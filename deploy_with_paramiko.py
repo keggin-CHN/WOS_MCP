@@ -2,13 +2,13 @@ import paramiko
 import os
 import sys
 
-host = '172.207.250.61'
+host = 'YOUR_SERVER_IP'
 port = 22
-username = 'keggin'
+username = 'YOUR_SSH_USERNAME'
 password = 'YOUR_PASSWORD_HERE'
 
-local_base = r'c:\code\wos'
-remote_base = '/home/keggin/wos_mcp_server'
+local_base = '.'
+remote_base = '/home/YOUR_SSH_USERNAME/wos_mcp_server'
 
 ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())

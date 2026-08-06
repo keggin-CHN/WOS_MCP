@@ -225,7 +225,7 @@ class WosLogin:
 
         if 'uia.njfu.edu.cn' in final_url and '/login' in final_url:
             # 检查错误信息
-            with open(r'C:\Users\asus\.gemini\antigravity-ide\brain\f42285ed-3713-47a2-9802-71011a3947e3\scratch\login_failed.html', 'w', encoding='utf-8') as f:
+            with open('login_failed.html', 'w', encoding='utf-8') as f:
                 f.write(resp.text)
             soup = BeautifulSoup(resp.text, 'html.parser')
             msg = soup.find(id='msg')
@@ -247,7 +247,7 @@ class WosLogin:
             return current_url, resp
 
         self._log(f'[Step5-7] 处理 IDP 属性同意页')
-        with open(r'C:\Users\asus\.gemini\antigravity-ide\brain\f42285ed-3713-47a2-9802-71011a3947e3\scratch\consent.html', 'w', encoding='utf-8') as f:
+        with open('consent.html', 'w', encoding='utf-8') as f:
             f.write(html)
         action, form_data = _parse_auto_submit_form(html)
 
@@ -313,7 +313,7 @@ class WosLogin:
             return m.group(1)
         
         if resp:
-            with open(r'C:\Users\asus\.gemini\antigravity-ide\brain\f42285ed-3713-47a2-9802-71011a3947e3\scratch\sid_failed.html', 'w', encoding='utf-8') as f:
+            with open('sid_failed.html', 'w', encoding='utf-8') as f:
                 f.write(resp.text)
 
         raise RuntimeError(f'无法提取 SID，最终 URL: {final_url[:200]}')
