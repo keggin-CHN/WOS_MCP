@@ -1,7 +1,10 @@
+mcp==1.29.0
 httpx
-mcp
+requests
+beautifulsoup4
+opencv-python-headless
+pycryptodome
 uvicorn
 starlette
-playwright
-pydantic
 anyio
+pydantic
