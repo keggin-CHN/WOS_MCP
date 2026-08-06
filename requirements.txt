@@ -1,0 +1,7 @@
+httpx
+mcp
+uvicorn
+starlette
+playwright
+pydantic
+anyio
