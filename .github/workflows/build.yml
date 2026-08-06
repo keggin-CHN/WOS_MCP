@@ -30,10 +30,12 @@ jobs:
       run: |
         pyinstaller WOS_MCP.spec
 
+    - name: Prepare Release Folder
+      run: |
+        copy wos_mcp\config.example.json dist\config.json
+
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: WOS_MCP-Windows
-        path: |
-          dist/WOS_MCP.exe
-          wos_mcp/config.example.json
+        path: dist/
