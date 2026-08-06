@@ -22,8 +22,8 @@ fi
 # Run the server in background with nohup
 echo "Starting server on port 7861..."
 # Kill any existing server on port 7861
-echo "Zhou060423rls@" | sudo -S killall microsocks || true
-echo "Zhou060423rls@" | sudo -S fuser -k 7861/tcp || true
+echo "YOUR_PASSWORD_HERE" | sudo -S killall microsocks || true
+echo "YOUR_PASSWORD_HERE" | sudo -S fuser -k 7861/tcp || true
 
 nohup python3 wos_mcp/server.py > mcp_server.log 2>&1 &
 echo "Server started successfully on port 7861!"

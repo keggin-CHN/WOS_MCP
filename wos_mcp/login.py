@@ -1,61 +1,3 @@
-"""
-WOS 协议登录模块（南京林业大学 CAS + Shibboleth SAML 认证链）
-
-认证流程（基于 HAR 抓包逆向）：
-────────────────────────────────────────────────────────────────────────────────
-Step 1: 触发 Shibboleth SP-initiated SSO
-  GET  https://www.webofknowledge.com/Shibboleth.sso/Login?SAMLDS=1
-           &target=https%3A%2F%2Fwww.webofknowledge.com%2F
-           &entityID=https%3A%2F%2Fidp-lib.njfu.edu.cn%2Fidp%2Fshibboleth
-  → 302 → access.clarivate.com/login?alternative=true&shibShireURL=...&shibReturnURL=...
-  
-  注意: access.clarivate.com 是 Angular SPA，它的 JS 会处理 IDP 选择并重定向
-  我们需要模拟 JS 行为，直接调用 shibReturnURL 加 entityID
-
-Step 2: 解析 WoK SP 生成的 SAML AuthnRequest
-  GET  shibReturnURL (含 SAMLDS=1 和 entityID)
-  → 实际会重定向到 IDP，并 POST SAMLRequest
-
-Step 3: POST SAMLRequest 到 IDP
-  POST https://idp-lib.njfu.edu.cn/idp/profile/SAML2/POST/SSO
-       RelayState=xxx, SAMLRequest=xxx
-  → 302 → execution=e1s1
-
-Step 4: GET CAS 登录页（含 lt token 和 AES key）
-  GET  uia.njfu.edu.cn/authserver/login?service=...
-
-Step 5: 检查验证码，POST 登录
-  POST uia.njfu.edu.cn/authserver/login （密码 AES 加密）
-  → 302 → ST ticket
-
-Step 6: CAS ticket → IDP
-  GET  idp/Authn/ExtCas?ticket=ST-xxx → 302 → e1s1&_eventId_proceed=1
-  → 302 → e1s2 (同意页)
-
-Step 7: 同意属性释放
-  POST idp/profile/SAML2/POST/SSO?execution=e1s2
-  → HTML 自动提交表单 (SAMLResponse)
-
-Step 8: POST SAMLResponse 到 WoK
-  POST https://www.webofknowledge.com/?auth=Shibboleth
-  → 302 → access.clarivate.com/login?detectSession=true
-
-Step 9: 拿 authCode
-  GET  access.clarivate.com/login?detectSession=true
-  → 302 → webofknowledge.com/?authCode=xxx
-
-Step 10: 拿 SID
-  GET  webofknowledge.com/?authCode=xxx
-  → 302 → ...?SID=xxx&...
-
-密码加密：AES-CBC-PKCS7
-  key = pwdDefaultEncryptSalt (16 字节, 从登录页 HTML 提取)
-  iv  = _rds(16) (随机 16 字节)
-  plaintext = _rds(64) + password
-  output = base64(AES-CBC(plaintext, key, iv))
-────────────────────────────────────────────────────────────────────────────────
-"""
-
 import re
 import random
 import base64
@@ -142,7 +84,7 @@ class WosLogin:
     南京林业大学 → Web of Science 协议登录客户端
 
     使用示例:
-        login = WosLogin('2410403132', 'Zhouwenjie@790920')
+        login = WosLogin('YOUR_USERNAME', 'YOUR_PASSWORD')
         sid = login.login()
         print('SID:', sid)
     """
@@ -431,7 +373,7 @@ def wos_login(username: str, password: str) -> tuple:
     一键登录，返回 (sid, cookies)。
     
     Example:
-        sid, cookies = wos_login('2410403132', 'Zhouwenjie@790920')
+        sid, cookies = wos_login('YOUR_USERNAME', 'YOUR_PASSWORD')
     """
     with WosLogin(username, password) as client:
         sid = client.login()
@@ -443,8 +385,8 @@ def wos_login(username: str, password: str) -> tuple:
 if __name__ == '__main__':
     import sys
 
-    username = sys.argv[1] if len(sys.argv) > 1 else '2410403132'
-    password = sys.argv[2] if len(sys.argv) > 2 else 'Zhouwenjie@790920'
+    username = sys.argv[1] if len(sys.argv) > 1 else 'YOUR_USERNAME'
+    password = sys.argv[2] if len(sys.argv) > 2 else 'YOUR_PASSWORD'
 
     try:
         sid, cookies = wos_login(username, password)
