@@ -134,7 +134,7 @@ def _do_captcha_verify(session: requests.Session, ident: str, captcha_id: str) -
     aes_key = secret_key if secret_key else token[:16]
     
     # Try exact offset and slightly adjusted
-    for adj in [0, -1, 1, -2, 2]:
+    for adj in [0, 1, -1]:
         x = offset_x + adj
         point_str = json.dumps({"x": x, "y": 5.0}, separators=(',', ':'))
         pointJson = _encrypt_aes(point_str, aes_key)
@@ -149,12 +149,12 @@ def _do_captcha_verify(session: requests.Session, ident: str, captcha_id: str) -
             "clientUid": "slider-uuid-" + str(int(time.time()*1000)),
             "ts": int(time.time() * 1000)
         }
-        resp_check = session.post(url_check, json=data_check, headers=headers_get, timeout=15.0)
+        resp_check = session.post(url_check, json=data_check, headers=headers_get, timeout=10.0)
         j_check = resp_check.json()
         if j_check.get('success', False):
             print(f"CAPTCHA bypass success with offset {x}")
             return True
-        time.sleep(1)
+        time.sleep(0.5)
         
     print("CAPTCHA bypass failed after all adjustments.")
     return False
