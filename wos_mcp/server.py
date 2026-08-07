@@ -808,6 +808,38 @@ def get_search_types() -> str:
 
 
 
+def background_maintainer():
+    """后台独立维护 WOS 和 CNKI Session"""
+    print("Background session maintainer started.")
+    while True:
+        try:
+            # Check and maintain WOS
+            while True:
+                try:
+                    ensure_session()
+                    print("[Background] WOS Session ensured successfully.")
+                    break
+                except Exception as e:
+                    print(f"[Background] WOS Session maintain failed: {e}. Retrying in 30s...")
+                    time.sleep(30)
+                    
+            # Check and maintain CNKI
+            while True:
+                try:
+                    temp_cnki = CnkiClient()
+                    temp_cnki.ensure_session()
+                    print("[Background] CNKI Session ensured successfully.")
+                    break
+                except Exception as e:
+                    print(f"[Background] CNKI Session maintain failed: {e}. Retrying in 30s...")
+                    time.sleep(30)
+                    
+        except Exception as e:
+            print(f"[Background] Unexpected error in maintainer loop: {e}")
+            
+        # Sleep for 2 hours
+        time.sleep(2 * 3600)
+
 if __name__ == "__main__":
     cfg = load_config()
     port = cfg.get("port", 5000)
@@ -835,5 +867,9 @@ if __name__ == "__main__":
     
     listen_public = cfg.get("listen_public", False)
     host = "0.0.0.0" if listen_public else "127.0.0.1"
+    
+    # Start background maintainer thread
+    maintainer_thread = threading.Thread(target=background_maintainer, daemon=True)
+    maintainer_thread.start()
     
     uvicorn.run(app, host=host, port=port)
