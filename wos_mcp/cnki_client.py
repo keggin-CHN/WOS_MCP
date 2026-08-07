@@ -200,7 +200,9 @@ class CnkiClient:
             save_config(cfg)
             
     def ensure_session(self):
-        with _cnki_session_lock:
+        if not _cnki_session_lock.acquire(timeout=10.0):
+            raise RuntimeError("系统正在进行登录认证，排队超时，请稍后再试。")
+        try:
             cfg = load_config()
             cookies = cfg.get("cnki_cookies", {})
             if cookies:
@@ -216,6 +218,8 @@ class CnkiClient:
             if not username or not password:
                 raise ValueError("Credentials (username/password) not configured in config.json")
             self.login(username, password)
+        finally:
+            _cnki_session_lock.release()
         
     def _solve_and_retry(self, resp, req_method, url, **kwargs):
         print(f"[{req_method}] Captcha triggered for URL: {url}")

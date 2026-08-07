@@ -98,7 +98,9 @@ def verify_session(sid: str, cookies: dict) -> bool:
 
 def ensure_session() -> tuple[str, dict]:
     """确保 session 有效，自动登录更新缓存"""
-    with _session_lock:
+    if not _session_lock.acquire(timeout=10.0):
+        raise RuntimeError("系统正在进行登录认证，排队超时，请稍后再试。")
+    try:
         cfg = load_config()
         sid = cfg.get("wos_sid")
         cookies = cfg.get("wos_cookies", {})
@@ -107,23 +109,25 @@ def ensure_session() -> tuple[str, dict]:
             print("缓存凭证验证成功。")
             return sid, cookies
 
-    print("缓存凭证已过期或不存在，正在自动登录获取新的凭证...")
-    username = cfg.get("username", "")
-    password = cfg.get("password", "")
-    if not username or not password:
-        raise ValueError("凭证已过期，且未配置账号密码。请在 config.json 中配置 username 和 password。")
+        print("缓存凭证已过期或不存在，正在自动登录获取新的凭证...")
+        username = cfg.get("username", "")
+        password = cfg.get("password", "")
+        if not username or not password:
+            raise ValueError("凭证已过期，且未配置账号密码。请在 config.json 中配置 username 和 password。")
 
-    sid, cookies = wos_login(username, password)
-    
-    cfg["wos_sid"] = sid
-    cfg["wos_cookies"] = cookies
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=4)
-    except Exception as e:
-        print(f"Error saving to config: {e}")
+        sid, cookies = wos_login(username, password)
+        
+        cfg["wos_sid"] = sid
+        cfg["wos_cookies"] = cookies
+        try:
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cfg, f, indent=4)
+        except Exception as e:
+            print(f"Error saving to config: {e}")
 
-    return sid, cookies
+        return sid, cookies
+    finally:
+        _session_lock.release()
 
 @mcp.tool()
 def search_literature(
