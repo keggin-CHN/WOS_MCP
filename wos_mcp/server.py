@@ -14,6 +14,8 @@ import threading
 import time
 import ctypes
 
+_session_lock = threading.Lock()
+
 def hide_console():
     time.sleep(20)
     hwnd = ctypes.windll.kernel32.GetConsoleWindow()
@@ -96,13 +98,14 @@ def verify_session(sid: str, cookies: dict) -> bool:
 
 def ensure_session() -> tuple[str, dict]:
     """确保 session 有效，自动登录更新缓存"""
-    cfg = load_config()
-    sid = cfg.get("wos_sid")
-    cookies = cfg.get("wos_cookies", {})
+    with _session_lock:
+        cfg = load_config()
+        sid = cfg.get("wos_sid")
+        cookies = cfg.get("wos_cookies", {})
 
-    if sid and cookies and verify_session(sid, cookies):
-        print("缓存凭证验证成功。")
-        return sid, cookies
+        if sid and cookies and verify_session(sid, cookies):
+            print("缓存凭证验证成功。")
+            return sid, cookies
 
     print("缓存凭证已过期或不存在，正在自动登录获取新的凭证...")
     username = cfg.get("username", "")

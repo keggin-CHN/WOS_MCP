@@ -9,6 +9,9 @@ from Crypto.Cipher import AES
 from bs4 import BeautifulSoup
 from login import WosLogin
 import urllib.parse
+import threading
+
+_cnki_session_lock = threading.Lock()
 
 class CnkiLogin(WosLogin):
     def _trigger_idp_sso(self) -> tuple[str, str]:
@@ -115,7 +118,7 @@ def _do_captcha_verify(session: requests.Session, ident: str, captcha_id: str) -
         "Origin": "https://kns.cnki.net",
         "Referer": f"https://kns.cnki.net/verify/home?captchaType=blockPuzzle&ident={ident}&captchaId={captcha_id}"
     }
-    resp = session.post(url_get, json=data_get, headers=headers_get)
+    resp = session.post(url_get, json=data_get, headers=headers_get, timeout=15.0)
     j = resp.json()
     if 'data' not in j or not j['data']:
         print("Failed to get captcha data:", j)
@@ -146,7 +149,7 @@ def _do_captcha_verify(session: requests.Session, ident: str, captcha_id: str) -
             "clientUid": "slider-uuid-" + str(int(time.time()*1000)),
             "ts": int(time.time() * 1000)
         }
-        resp_check = session.post(url_check, json=data_check, headers=headers_get)
+        resp_check = session.post(url_check, json=data_check, headers=headers_get, timeout=15.0)
         j_check = resp_check.json()
         if j_check.get('success', False):
             print(f"CAPTCHA bypass success with offset {x}")
@@ -197,21 +200,22 @@ class CnkiClient:
             save_config(cfg)
             
     def ensure_session(self):
-        cfg = load_config()
-        cookies = cfg.get("cnki_cookies", {})
-        if cookies:
-            self.session.cookies = requests.utils.cookiejar_from_dict(cookies)
-            
-            # simple verify
-            resp = self._safe_get("https://kns.cnki.net/kns8s/AdvSearch", allow_redirects=True)
-            if resp.status_code == 200 and 'verify/home' not in resp.url:
-                return
+        with _cnki_session_lock:
+            cfg = load_config()
+            cookies = cfg.get("cnki_cookies", {})
+            if cookies:
+                self.session.cookies = requests.utils.cookiejar_from_dict(cookies)
                 
-        username = cfg.get("username", "")
-        password = cfg.get("password", "")
-        if not username or not password:
-            raise ValueError("Credentials (username/password) not configured in config.json")
-        self.login(username, password)
+                # simple verify
+                resp = self._safe_get("https://kns.cnki.net/kns8s/AdvSearch", allow_redirects=True)
+                if resp.status_code == 200 and 'verify/home' not in resp.url:
+                    return
+                    
+            username = cfg.get("username", "")
+            password = cfg.get("password", "")
+            if not username or not password:
+                raise ValueError("Credentials (username/password) not configured in config.json")
+            self.login(username, password)
         
     def _solve_and_retry(self, resp, req_method, url, **kwargs):
         print(f"[{req_method}] Captcha triggered for URL: {url}")
@@ -240,12 +244,14 @@ class CnkiClient:
         return resp
         
     def _safe_get(self, url, **kwargs):
+        kwargs.setdefault('timeout', 15.0)
         resp = self.session.get(url, **kwargs)
         if 'verify/home' in resp.url or resp.status_code == 403:
             resp = self._solve_and_retry(resp, 'GET', url, **kwargs)
         return resp
         
     def _safe_post(self, url, **kwargs):
+        kwargs.setdefault('timeout', 15.0)
         resp = self.session.post(url, **kwargs)
         if 'verify/home' in resp.url or resp.status_code == 403:
             resp = self._solve_and_retry(resp, 'POST', url, **kwargs)
