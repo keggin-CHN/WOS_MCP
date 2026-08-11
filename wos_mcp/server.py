@@ -8,11 +8,13 @@ from mcp.server.fastmcp import FastMCP
 from login import wos_login, USER_AGENT
 from bs4 import BeautifulSoup
 from cnki_client import CnkiClient
+from config_util import load_config, save_config, get_credentials, set_credentials
 
 import sys
 import threading
 import time
 import ctypes
+import re
 
 _session_lock = threading.Lock()
 
@@ -39,16 +41,6 @@ else:
 
 CONFIG_FILE = BASE_DIR / "config.json"
 
-
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading config: {e}")
-    return {}
-
 config = load_config()
 dp_str = config.get("download_path", "download")
 dp = Path(dp_str)
@@ -60,6 +52,73 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 from mcp.server.transport_security import TransportSecuritySettings
 mcp = FastMCP("Academic_WoS_CNKI", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 cnki_client = CnkiClient()
+
+# ─── 输入校验 / 消毒（防查询注入与路径穿越）───────────────────────────────
+
+# 允许在查询词中保留的字符（其余一律替换为空格，防 WoS 查询语法注入）
+_QUERY_SAFE_RE = re.compile(r'[^A-Za-z0-9 \-\*\?\.\'"\u4e00-\u9fff]')
+_YEAR_RANGE_RE = re.compile(r'^\d{4}$|^\d{4}-\d{4}$')
+_DOC_TYPE_RE = re.compile(r'^[A-Za-z][A-Za-z \-]*$')
+_WOS_ID_RE = re.compile(r'^WOS:[A-Z0-9]+$')
+
+
+def sanitize_query(query: str, field: str = "TS") -> str:
+    """消毒用户查询，去除 WoS 查询语法中的危险字符（括号、逻辑运算符等）。"""
+    if not query or not query.strip():
+        raise ValueError("查询词不能为空")
+    cleaned = _QUERY_SAFE_RE.sub(' ', query)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    if not cleaned:
+        raise ValueError("查询词经消毒后为空，请使用字母/数字/空格重试")
+    # 括号是 WoS 分组语法，剥离后若查询被拆碎，直接用原始词做短语匹配更安全
+    return cleaned
+
+
+def validate_year_range(year_range: str) -> str:
+    """严格校验年份区间，仅允许 2020 或 2020-2024 形式。"""
+    year_range = (year_range or "").strip()
+    if not year_range:
+        return ""
+    if not _YEAR_RANGE_RE.match(year_range):
+        raise ValueError("year_range 格式非法，仅支持如 2020 或 2020-2024")
+    return year_range
+
+
+def validate_doc_type(doc_type: str) -> str:
+    """文献类型白名单校验，仅允许英文单词。"""
+    doc_type = (doc_type or "").strip()
+    if not doc_type:
+        return ""
+    if not _DOC_TYPE_RE.match(doc_type):
+        raise ValueError("doc_type 仅支持英文单词（如 Article / Review），且不含括号或引号")
+    return doc_type
+
+
+def validate_wos_id(wos_id: str) -> str:
+    """校验 WoS ID 格式（如 WOS:000295471900004）。"""
+    wos_id = (wos_id or "").strip()
+    if not _WOS_ID_RE.match(wos_id):
+        raise ValueError("wos_id 格式非法，应为 WOS: 后跟字母数字（如 WOS:000295471900004）")
+    return wos_id
+
+
+def clamp_limit(limit: int, default: int = 10, max_: int = 100) -> int:
+    """把 limit 限制到 [1, max_] 区间，防止负数/超大值打爆接口。"""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = default
+    return max(1, min(limit, max_))
+
+
+def safe_filename(name: str) -> str:
+    """清洗下载文件名，防路径穿越（`..`、绝对路径、Windows 保留字符）。"""
+    # 替换所有路径分隔符与危险字符
+    cleaned = re.sub(r'[\\/\x00-\x1f:?*"<>|]', '_', name)
+    # 折叠连续的 .. 点，防止目录穿越
+    cleaned = re.sub(r'\.\.+', '_', cleaned)
+    cleaned = cleaned.strip('. ')
+    return cleaned or "download"
 
 def verify_session(sid: str, cookies: dict) -> bool:
     """验证当前的 SID 是否有效"""
@@ -110,20 +169,16 @@ def ensure_session() -> tuple[str, dict]:
             return sid, cookies
 
         print("缓存凭证已过期或不存在，正在自动登录获取新的凭证...")
-        username = cfg.get("username", "")
-        password = cfg.get("password", "")
+        username, password = get_credentials(cfg)
         if not username or not password:
-            raise ValueError("凭证已过期，且未配置账号密码。请在 config.json 中配置 username 和 password。")
+            raise ValueError("凭证已过期，且未配置账号密码。请在 config.json 配置 username，密码可通过环境变量 WOS_PASSWORD 或 config.json 提供。")
 
         sid, cookies = wos_login(username, password)
         
         cfg["wos_sid"] = sid
         cfg["wos_cookies"] = cookies
-        try:
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=4)
-        except Exception as e:
-            print(f"Error saving to config: {e}")
+        set_credentials(cfg, username, password)
+        save_config(cfg)
 
         return sid, cookies
     finally:
@@ -154,7 +209,17 @@ def search_literature(
     """
     if editions is None:
         editions = []
-        
+    
+    # 输入消毒：防 WoS 查询语法注入
+    try:
+        query = sanitize_query(query)
+        year_range = validate_year_range(year_range)
+        doc_type = validate_doc_type(doc_type)
+        limit = clamp_limit(limit, default=10, max_=100)
+        first = max(1, int(first))
+    except (ValueError, TypeError) as e:
+        return f"参数错误: {e}"
+
     try:
         sid, cookies = ensure_session()
     except Exception as e:
@@ -300,6 +365,11 @@ def get_wos_paper_details(wos_id: str) -> str:
         wos_id: The Web of Science ID (e.g., WOS:000295471900004).
     """
     try:
+        wos_id = validate_wos_id(wos_id)
+    except ValueError as e:
+        return f"参数错误: {e}"
+
+    try:
         sid, cookies = ensure_session()
     except Exception as e:
         return f"Error ensuring session: {e}"
@@ -430,6 +500,79 @@ def get_wos_paper_details(wos_id: str) -> str:
     except Exception as e:
         return f"An error occurred: {str(e)}"
 
+def _fetch_doi_by_wosid(sid: str, cookies: dict, wos_id: str) -> str:
+    """通过 WoS 检索接口用 UT 字段查询记录，返回 DOI（找不到返回空串）。"""
+    url = f"https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID={sid}"
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Origin": "https://www.webofscience.com",
+        "Content-Type": "text/plain;charset=UTF-8",
+        "Accept": "application/x-ndjson, application/json, text/plain, */*",
+    }
+    payload = {
+        "product": "WOSCC",
+        "searchMode": "general",
+        "viewType": "search",
+        "serviceMode": "summary",
+        "search": {
+            "mode": "general",
+            "database": "WOSCC",
+            "query": [{"rowField": "UT", "rowText": f"{wos_id}"}]
+        },
+        "retrieve": {
+            "first": 1,
+            "count": 1,
+            "history": False,
+            "jcr": False,
+            "sort": "relevance",
+            "analyzes": [],
+            "locale": "en"
+        },
+        "eventMode": None
+    }
+    try:
+        with httpx.Client(cookies=cookies) as client:
+            response = client.post(url, headers=headers, json=payload, timeout=15.0)
+            if response.status_code != 200:
+                return ""
+            try:
+                parsed_data = response.json()
+            except json.JSONDecodeError:
+                parsed_data = []
+                for line in response.text.strip().split('\n'):
+                    if not line.strip():
+                        continue
+                    try:
+                        parsed_data.append(json.loads(line))
+                    except Exception:
+                        pass
+            records_data = next((item.get('payload') for item in parsed_data
+                                 if isinstance(item, dict) and item.get('key') == 'records'), {})
+            if isinstance(records_data, dict) and records_data:
+                rec = list(records_data.values())[0]
+                return rec.get("doi", "")
+    except Exception as e:
+        print(f"[download_literature] 查询 WoS ID 失败: {e}")
+    return ""
+
+
+def _try_download_pdf(doi: str, pdf_url: str) -> str:
+    """尝试把 PDF 下载到本地目录，返回结果描述。"""
+    try:
+        pdf_resp = httpx.get(pdf_url, follow_redirects=True, timeout=30)
+        if pdf_resp.status_code == 200 and 'application/pdf' in pdf_resp.headers.get('Content-Type', '').lower():
+            # 安全文件名：防路径穿越
+            safe_doi = safe_filename(doi)
+            filename = f"{safe_doi}.pdf"
+            filepath = DOWNLOAD_DIR / filename
+            with open(filepath, 'wb') as f:
+                f.write(pdf_resp.content)
+            return f"成功下载了全文 PDF！已保存至本地：{filepath.absolute()}"
+    except Exception as e:
+        print(f"Failed to download PDF: {e}")
+    return ""
+
+
 @mcp.tool()
 def download_literature(doi_or_wosid: str) -> str:
     """
@@ -437,39 +580,45 @@ def download_literature(doi_or_wosid: str) -> str:
     If possible, attempts to sniff and download the PDF locally.
     
     Args:
-        doi_or_wosid: The DOI or Web of Science ID.
+        doi_or_wosid: The DOI (e.g. "10.1000/xyz123") or Web of Science ID (e.g. "WOS:000295471900004").
     """
+    doi_or_wosid = (doi_or_wosid or "").strip()
+    if not doi_or_wosid:
+        return "参数错误: 请输入 DOI 或 WoS ID"
     try:
         sid, cookies = ensure_session()
     except Exception as e:
         return f"Error ensuring session: {e}"
 
-    if doi_or_wosid.startswith('10.'):
-        unpaywall_url = f"https://api.unpaywall.org/v2/{doi_or_wosid}?email=mcp-test@example.com"
+    # 归一化为 DOI：WoS ID 先查记录拿 DOI
+    doi = doi_or_wosid
+    is_doi = doi_or_wosid.startswith('10.')
+    if not is_doi:
         try:
-            resp = httpx.get(unpaywall_url, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                best_oa_loc = data.get("best_oa_location")
-                if best_oa_loc and best_oa_loc.get("url_for_pdf"):
-                    pdf_url = best_oa_loc.get("url_for_pdf")
-                    try:
-                        pdf_resp = httpx.get(pdf_url, follow_redirects=True, timeout=30)
-                        if pdf_resp.status_code == 200 and 'application/pdf' in pdf_resp.headers.get('Content-Type', '').lower():
-                            filename = f"{doi_or_wosid.replace('/', '_')}.pdf"
-                            filepath = DOWNLOAD_DIR / filename
-                            with open(filepath, 'wb') as f:
-                                f.write(pdf_resp.content)
-                            return f"成功下载了全文 PDF！已保存至本地：{filepath.absolute()}"
-                    except Exception as e:
-                        print(f"Failed to download PDF: {e}")
-                        pass
-        except Exception as e:
-            print(f"Failed to hit unpaywall: {e}")
-            pass
+            doi_or_wosid = validate_wos_id(doi_or_wosid)
+        except ValueError as e:
+            return f"参数错误: {e}"
+        doi = _fetch_doi_by_wosid(sid, cookies, doi_or_wosid)
+        if not doi:
+            return (f"未能通过 WoS ID {doi_or_wosid} 查询到 DOI（可能不在核心合集或会话失效）。\n\n"
+                    f"请提示用户：可手动访问 https://www.webofscience.com/wos/woscc/full-record/{doi_or_wosid} 查看。")
+
+    try:
+        unpaywall_url = f"https://api.unpaywall.org/v2/{doi}?email=mcp-test@example.com"
+        resp = httpx.get(unpaywall_url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            best_oa_loc = data.get("best_oa_location")
+            if best_oa_loc and best_oa_loc.get("url_for_pdf"):
+                pdf_url = best_oa_loc.get("url_for_pdf")
+                result = _try_download_pdf(doi, pdf_url)
+                if result:
+                    return result
+    except Exception as e:
+        print(f"Failed to hit unpaywall: {e}")
 
     return (f"未能嗅探到可直接下载的免费 PDF。\n\n"
-            f"请提示用户：未找到直接的 PDF 下载流。建议引导用户手动通过 DOI 跳转下载：https://doi.org/{doi_or_wosid}")
+            f"请提示用户：未找到直接的 PDF 下载流。建议引导用户手动通过 DOI 跳转下载：https://doi.org/{doi}")
 
 
 @mcp.tool()
@@ -491,12 +640,19 @@ def export_wos_papers(
         doc_type: Optional document type (e.g. "Article", "Review").
         format: The export format. Options: "csv", "json", "bibtex", "ris".
     """
+    # 输入校验
+    try:
+        query = sanitize_query(query)
+        year_range = validate_year_range(year_range)
+        doc_type = validate_doc_type(doc_type)
+        limit = clamp_limit(limit, default=50, max_=100)
+    except (ValueError, TypeError) as e:
+        return f"参数错误: {e}"
+
     try:
         sid, cookies = ensure_session()
     except Exception as e:
         return f"Error ensuring session: {e}"
-
-    if limit > 100: limit = 100
     url = f"https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID={sid}"
     headers = {
         "User-Agent": USER_AGENT,
@@ -638,10 +794,10 @@ def export_wos_papers(
                     row = dict(r)
                     row["authors"] = "; ".join(row["authors"])
                     writer.writerow(row)
-                return output.getvalue()
+                content = output.getvalue()
                 
             elif fmt == "json":
-                return json_lib.dumps(records, indent=2, ensure_ascii=False)
+                content = json_lib.dumps(records, indent=2, ensure_ascii=False)
                 
             elif fmt == "bibtex":
                 result = []
@@ -658,7 +814,7 @@ def export_wos_papers(
                         (f"  doi={{{r['doi']}}},\n" if r["doi"] else "") +
                         f"  abstract={{{r['abstract']}}}\n" +
                         "}")
-                return "\n\n".join(result)
+                content = "\n\n".join(result)
                 
             elif fmt == "ris":
                 result = []
@@ -683,10 +839,28 @@ def export_wos_papers(
                     ris_str += f"ID  - {r['wosId']}\n"
                     ris_str += "ER  -"
                     result.append(ris_str)
-                return "\n\n".join(result)
+                content = "\n\n".join(result)
                 
             else:
                 return f"Unsupported format: {fmt}. Use csv, json, bibtex, or ris."
+            
+            # 写入下载目录（真实落盘）
+            safe_q = safe_filename(query)[:40]
+            timestamp = int(time.time())
+            filename = f"wos_export_{safe_q}_{timestamp}.{fmt}"
+            filepath = DOWNLOAD_DIR / filename
+            try:
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    f.write(content)
+            except Exception as e:
+                return f"写入导出文件失败: {e}"
+            
+            preview = content[:300].replace('\n', ' ')
+            return (f"已导出 **{len(records)}** 条文献记录。\n"
+                    f"文件已保存至：{filepath.absolute()}\n"
+                    f"文件大小：{len(content.encode('utf-8'))} 字节\n"
+                    f"格式：{fmt}\n\n"
+                    f"内容预览：\n{preview}")
                 
     except Exception as e:
         return f"An error occurred during export: {str(e)}"

@@ -20,12 +20,16 @@
 ```json
 {
     "username": "您的账号",
-    "password": "您的密码",
     "port": 7861,
     "listen_public": false
 }
 ```
 2. 双击运行 `WOS_MCP.exe`。
+
+> ⚠️ **密码安全说明**：
+> - 密码**不要**明文写在 `config.json` 里。首次登录后程序会把密码加密写入 `password_enc` 字段（AES-256-GCM），密钥保存在同目录 `config.key`（权限 600）或环境变量 `WOS_CONFIG_KEY` 中。
+> - 也可以完全不写密码：通过环境变量注入 `WOS_USERNAME` / `WOS_PASSWORD`。
+> - 旧版明文 `password` 字段仍会被兼容读取，但保存时会自动迁移为密文。
 
 ---
 

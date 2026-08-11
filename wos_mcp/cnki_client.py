@@ -8,6 +8,7 @@ import re
 from Crypto.Cipher import AES
 from bs4 import BeautifulSoup
 from login import WosLogin
+from config_util import load_config, save_config, get_credentials, set_credentials
 import urllib.parse
 import threading
 
@@ -36,36 +37,6 @@ class CnkiLogin(WosLogin):
             return "SUCCESS"
         self._log("No SAMLResponse found. Checking URL...")
         return "NO_SAML"
-import sys
-from pathlib import Path
-
-if getattr(sys, 'frozen', False):
-    BASE_DIR = Path(sys.executable).parent
-else:
-    _parent = Path(__file__).parent.parent
-    _self_dir = Path(__file__).parent
-    if (_parent / "config.json").exists():
-        BASE_DIR = _parent
-    else:
-        BASE_DIR = _self_dir
-
-CONFIG_FILE = BASE_DIR / "config.json"
-
-def load_config() -> dict:
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-def save_config(cfg: dict):
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=4)
-    except Exception as e:
-        print(f"Error saving to config: {e}")
 
 # ================= CAPTCHA SOLVER =================
 
@@ -195,8 +166,7 @@ class CnkiClient:
             cfg = load_config()
             cookie_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
             cfg['cnki_cookies'] = cookie_dict
-            cfg['username'] = username
-            cfg['password'] = password
+            set_credentials(cfg, username, password)
             save_config(cfg)
             
     def ensure_session(self):
@@ -213,8 +183,7 @@ class CnkiClient:
                 if resp.status_code == 200 and 'verify/home' not in resp.url:
                     return
                     
-            username = cfg.get("username", "")
-            password = cfg.get("password", "")
+            username, password = get_credentials(cfg)
             if not username or not password:
                 raise ValueError("Credentials (username/password) not configured in config.json")
             self.login(username, password)
