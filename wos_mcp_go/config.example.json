@@ -1,0 +1,12 @@
+{
+    "username": "YOUR_USERNAME",
+    "password": "YOUR_PASSWORD",
+    "port": 5000,
+    "download_path": "download",
+    "wos_sid": "",
+    "wos_cookies": {},
+    "cnki_cookies": {
+        "KNS2COOKIE": "1786581545.289.215878.783945|b25e41a932fd162af3b8c5cff4059fc3",
+        "SID_kns_new": "kns018109"
+    }
+}

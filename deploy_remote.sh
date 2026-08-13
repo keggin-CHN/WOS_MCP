@@ -1,18 +1,11 @@
 #!/bin/bash
 
-# Setup virtual environment if it doesn't exist
-if [ ! -d "venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv venv
-fi
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install -r wos_mcp/requirements.txt
-pip install beautifulsoup4 opencv-python-headless mcp==1.29.0 anyio starlette httpx pycryptodome uvicorn requests
+# Build Go application
+echo "Building Go application..."
+cd wos_mcp_go
+go mod tidy
+go build -o ../wos_mcp
+cd ..
 
 # Set port to 7861
 if [ -f "config.json" ]; then
@@ -35,9 +28,9 @@ if command -v fuser >/dev/null 2>&1; then
     fuser -k 7861/tcp 2>/dev/null || true
 fi
 
-# Run the server in background with nohup
-echo "Starting server on port 7861..."
-nohup python3 wos_mcp/server.py > mcp_server.log 2>&1 &
+# Run in background
+echo "Starting server in background..."
+nohup ./wos_mcp > server.log 2>&1 &
 echo $! > mcp_server.pid
 echo "Server started successfully on port 7861! (PID $(cat mcp_server.pid))"
 echo "Logs: mcp_server.log  |  Stop: kill \$(cat mcp_server.pid)"
