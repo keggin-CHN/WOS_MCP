@@ -53,8 +53,35 @@ func sanitizeQuery(query string) (string, error) {
 	return cleaned, nil
 }
 
-func main() {
+func backgroundMaintainer() {
+	fmt.Fprintf(os.Stderr, "[Background] Session maintainer started.\n")
+	for {
+		for {
+			_, _, err := ensureWosSession()
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "[Background] WOS Session ensured successfully.\n")
+				break
+			}
+			fmt.Fprintf(os.Stderr, "[Background] WOS Session maintain failed: %v. Retrying in 30s...\n", err)
+			time.Sleep(30 * time.Second)
+		}
 
+		for {
+			err := cnkiClient.ensureSession()
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "[Background] CNKI Session ensured successfully.\n")
+				break
+			}
+			fmt.Fprintf(os.Stderr, "[Background] CNKI Session maintain failed: %v. Retrying in 30s...\n", err)
+			time.Sleep(30 * time.Second)
+		}
+
+		time.Sleep(2 * time.Hour)
+	}
+}
+
+func main() {
+	go backgroundMaintainer()
 	s := server.NewMCPServer(
 		"Academic_WoS_CNKI",
 		"1.0.0",
@@ -78,7 +105,7 @@ func main() {
 		mcp.WithNumber("limit", mcp.Description("Number of results to return")),
 	), searchCnkiHandler)
 
-	fmt.Println("Starting MCP server on stdio...")
+	fmt.Fprintf(os.Stderr, "Starting MCP server on stdio...\n")
 
 	if err := server.ServeStdio(s); err != nil {
 		fmt.Printf("Server error: %v\n", err)
