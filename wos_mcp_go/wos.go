@@ -57,19 +57,19 @@ func ensureWosSession() (string, map[string]string, error) {
 func verifyWosSession(sid string, cookies map[string]string) bool {
 	url := fmt.Sprintf("https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID=%s", sid)
 	payload := map[string]interface{}{
-		"product":	"ALLDB",
-		"searchMode":	"general_semantic",
-		"viewType":	"search",
-		"serviceMode":	"summary",
+		"product":     "ALLDB",
+		"searchMode":  "general_semantic",
+		"viewType":    "search",
+		"serviceMode": "summary",
 		"search": map[string]interface{}{
-			"mode":		"general_semantic",
-			"database":	"ALLDB",
-			"disableEdit":	false,
-			"query":	[]map[string]interface{}{{"rowText": "TS=(test)"}},
-			"display":	map[string]interface{}{"key": "nlp", "params": map[string]interface{}{"input": "test", "query_type": "Single-Term Concept"}},
-			"count":	1,
+			"mode":        "general_semantic",
+			"database":    "ALLDB",
+			"disableEdit": false,
+			"query":       []map[string]interface{}{{"rowText": "TS=(test)"}},
+			"display":     map[string]interface{}{"key": "nlp", "params": map[string]interface{}{"input": "test", "query_type": "Single-Term Concept"}},
+			"count":       1,
 		},
-		"retrieve":	map[string]interface{}{"count": 1, "history": false, "locale": "en"},
+		"retrieve": map[string]interface{}{"count": 1, "history": false, "locale": "en"},
 	}
 
 	data, _ := json.Marshal(payload)

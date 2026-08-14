@@ -47,7 +47,7 @@ func downloadLiteratureHandler(ctx context.Context, request mcp.CallToolRequest)
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("Error ensuring session: %v", err)), nil
 		}
-		
+
 		url := fmt.Sprintf("https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID=%s", sid)
 		payload := map[string]interface{}{
 			"product":     "WOSCC",
@@ -81,7 +81,7 @@ func downloadLiteratureHandler(ctx context.Context, request mcp.CallToolRequest)
 		for k, v := range cookies {
 			req.AddCookie(&http.Cookie{Name: k, Value: v})
 		}
-		
+
 		httpClient := &http.Client{Timeout: 15 * time.Second}
 		respWos, err := httpClient.Do(req)
 		if err != nil {
@@ -248,7 +248,7 @@ func exportWosPapersHandler(ctx context.Context, request mcp.CallToolRequest) (*
 	for k, v := range cookies {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
-	
+
 	httpClient := &http.Client{Timeout: 15 * time.Second}
 	respWos, err := httpClient.Do(req)
 	if err != nil {
@@ -256,7 +256,7 @@ func exportWosPapersHandler(ctx context.Context, request mcp.CallToolRequest) (*
 	}
 	defer respWos.Body.Close()
 	bodyBytes, _ := io.ReadAll(respWos.Body)
-	
+
 	// Simplified export format for demo (JSON stringified)
 	return mcp.NewToolResultText(fmt.Sprintf("Export format %s requested.\n\nRaw WOS API Response (truncated):\n%s...", format, string(bodyBytes)[:500])), nil
 }

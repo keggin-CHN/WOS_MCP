@@ -36,7 +36,7 @@ func newCookieJar() (http.CookieJar, error) {
 // falls back to HTTP/1.1 which our transport can handle.
 func newUTLSTransport() *http.Transport {
 	return &http.Transport{
-		ForceAttemptHTTP2:	false,
+		ForceAttemptHTTP2: false,
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, err := net.DialTimeout(network, addr, 15*time.Second)
 			if err != nil {
@@ -75,18 +75,18 @@ func newUTLSTransport() *http.Transport {
 }
 
 const (
-	casHost		= "https://uia.njfu.edu.cn"
-	idpHost		= "https://idp-lib.njfu.edu.cn"
-	wokHost		= "https://www.webofknowledge.com"
-	wosHost		= "https://www.webofscience.com"
-	userAgent	= "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	casHost   = "https://uia.njfu.edu.cn"
+	idpHost   = "https://idp-lib.njfu.edu.cn"
+	wokHost   = "https://www.webofknowledge.com"
+	wosHost   = "https://www.webofscience.com"
+	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 var (
-	wayflessURL	= fmt.Sprintf("%s/?auth=ShibbolethIdPForm&entityID=%s&target=%s",
+	wayflessURL = fmt.Sprintf("%s/?auth=ShibbolethIdPForm&entityID=%s&target=%s",
 		wokHost, url.QueryEscape(idpHost+"/idp/shibboleth"), url.QueryEscape(wokHost+"/?DestApp=UA"))
 
-	chars	= "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
+	chars = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678"
 )
 
 func rds(length int) string {
@@ -141,21 +141,21 @@ func parseAutoSubmitForm(doc *goquery.Document) (string, url.Values, error) {
 }
 
 type WosLoginClient struct {
-	client		*http.Client
-	username	string
-	password	string
+	client   *http.Client
+	username string
+	password string
 }
 
 func NewWosLoginClient(username, password string) *WosLoginClient {
 	jar, _ := newCookieJar()
 	client := &http.Client{
-		Jar:		jar,
-		Timeout:	30 * time.Second,
+		Jar:     jar,
+		Timeout: 30 * time.Second,
 	}
 	return &WosLoginClient{
-		client:		client,
-		username:	username,
-		password:	password,
+		client:   client,
+		username: username,
+		password: password,
 	}
 }
 

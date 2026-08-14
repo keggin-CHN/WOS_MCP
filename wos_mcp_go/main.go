@@ -20,12 +20,12 @@ import (
 )
 
 var (
-	querySafeRe	= regexp.MustCompile(`[^A-Za-z0-9 \-\*\?\.\'"\x{4e00}-\x{9fff}]`)
-	yearRangeRe	= regexp.MustCompile(`^\d{4}$|^\d{4}-\d{4}$`)
-	docTypeRe	= regexp.MustCompile(`^[A-Za-z][A-Za-z \-]*$`)
-	wosIDRe		= regexp.MustCompile(`^WOS:[A-Z0-9]+$`)
-	cnkiClient	= NewCnkiClient()
-	downloadDir	string
+	querySafeRe = regexp.MustCompile(`[^A-Za-z0-9 \-\*\?\.\'"\x{4e00}-\x{9fff}]`)
+	yearRangeRe = regexp.MustCompile(`^\d{4}$|^\d{4}-\d{4}$`)
+	docTypeRe   = regexp.MustCompile(`^[A-Za-z][A-Za-z \-]*$`)
+	wosIDRe     = regexp.MustCompile(`^WOS:[A-Z0-9]+$`)
+	cnkiClient  = NewCnkiClient()
+	downloadDir string
 )
 
 func init() {
@@ -161,21 +161,12 @@ func setupServer() *server.MCPServer {
 }
 
 func main() {
-	f, _ := os.OpenFile("C:\\Users\\asus\\OneDrive\\Desktop\\WOS MCP\\debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if f != nil {
-		os.Stderr = f
-		os.Stdout = f
-		log.SetOutput(f)
-	}
-
-	go backgroundMaintainer()
-	
 	// Read config for SSE port
 	cfg := LoadConfig()
 	portF, _ := cfg["port"].(float64)
 	port := int(portF)
 	if port == 0 {
-		port = 7861
+		port = 5000
 	}
 	listenPublic, _ := cfg["listen_public"].(bool)
 	host := "127.0.0.1"
@@ -183,6 +174,40 @@ func main() {
 		host = "0.0.0.0"
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Log file for ongoing diagnostics. Once opened, stdout/stderr are
+	// redirected to it so the console only ever shows the banner below, and
+	// logs keep being persisted after the console is detached.
+	logFile := openLogFile()
+	logPath := ""
+	if logFile != nil {
+		logPath = logFile.Name()
+	}
+
+	// Startup banner — the only thing the user sees before the window closes.
+	fmt.Printf("============================================================\n")
+	fmt.Printf(" WOS & CNKI MCP Server  v1.0.0\n")
+	fmt.Printf(" 功能: Web of Science 检索 / CNKI 检索·免验证摘要\n")
+	fmt.Printf(" 后台维护: 每 2 小时自动校验并刷新 WOS / CNKI 登录 Cookie\n")
+	fmt.Printf(" ------------------------------------------------------------\n")
+	fmt.Printf(" SSE 端点 : http://%s/sse\n", addr)
+	if logPath != "" {
+		fmt.Printf(" 日志文件 : %s\n", logPath)
+	} else {
+		fmt.Printf(" 日志文件 : (打开失败, 输出保持到当前终端)\n")
+	}
+	fmt.Printf(" ------------------------------------------------------------\n")
+	fmt.Printf(" 本窗口将在 5 秒后自动关闭, 服务转为后台静默运行。\n")
+	fmt.Printf(" 需要停止时, 请在任务管理器中结束 wos_mcp_go.exe\n")
+	fmt.Printf("============================================================\n")
+
+	if logFile != nil {
+		os.Stderr = logFile
+		os.Stdout = logFile
+		log.SetOutput(logFile)
+	}
+
+	go backgroundMaintainer()
 
 	// Start SSE server in a goroutine
 	sseServer := server.NewSSEServer(setupServer())
@@ -193,16 +218,46 @@ func main() {
 		}
 	}()
 
+	// Close the console window 5s after launch so the server keeps running
+	// silently in the background (Windows only; no-op elsewhere).
+	go func() {
+		time.Sleep(5 * time.Second)
+		detachConsole()
+	}()
+
 	// Start Stdio server on main thread
 	fmt.Fprintf(os.Stderr, "[Stdio] Starting MCP server on stdio...\n")
 	if err := server.ServeStdio(setupServer()); err != nil {
 		fmt.Fprintf(os.Stderr, "[Stdio] Server error (or stdin closed): %v\n", err)
 	}
-	
+
 	// Block forever without causing a deadlock panic
 	var wg sync.WaitGroup
 	wg.Add(1)
 	wg.Wait()
+}
+
+// openLogFile opens (creating as needed) the debug log file. Prefers the
+// existing OneDrive Desktop location, then a debug.log next to the executable,
+// then the system temp dir — so logging works even when a path is missing.
+func openLogFile() *os.File {
+	candidates := []string{
+		`C:\Users\asus\OneDrive\Desktop\WOS MCP\debug.log`, // 既有日志位置
+	}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "debug.log"))
+	}
+	candidates = append(candidates, filepath.Join(os.TempDir(), "wos_mcp_go_debug.log"))
+	for _, p := range candidates {
+		if dir := filepath.Dir(p); dir != "" {
+			_ = os.MkdirAll(dir, 0755)
+		}
+		f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			return f
+		}
+	}
+	return nil
 }
 
 func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -236,28 +291,28 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 
 	url := fmt.Sprintf("https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID=%s", sid)
 	payload := map[string]interface{}{
-		"product":	"ALLDB",
-		"searchMode":	"general_semantic",
-		"viewType":	"search",
-		"serviceMode":	"summary",
+		"product":     "ALLDB",
+		"searchMode":  "general_semantic",
+		"viewType":    "search",
+		"serviceMode": "summary",
 		"search": map[string]interface{}{
-			"mode":		"general_semantic",
-			"database":	"ALLDB",
-			"disableEdit":	false,
-			"query":	[]map[string]interface{}{{"rowText": fmt.Sprintf("TS=(%s)", query)}},
-			"display":	map[string]interface{}{"key": "nlp", "params": map[string]interface{}{"input": query, "query_type": "Single-Term Concept"}},
-			"blending":	"blended",
-			"count":	limit,
+			"mode":        "general_semantic",
+			"database":    "ALLDB",
+			"disableEdit": false,
+			"query":       []map[string]interface{}{{"rowText": fmt.Sprintf("TS=(%s)", query)}},
+			"display":     map[string]interface{}{"key": "nlp", "params": map[string]interface{}{"input": query, "query_type": "Single-Term Concept"}},
+			"blending":    "blended",
+			"count":       limit,
 		},
 		"retrieve": map[string]interface{}{
-			"first":	1,
-			"count":	limit,
-			"history":	true,
-			"jcr":		true,
-			"sort":		"relevance",
-			"analyzes":	[]string{"TP.Value.6"},
-			"trueCount":	false,
-			"locale":	"en",
+			"first":     1,
+			"count":     limit,
+			"history":   true,
+			"jcr":       true,
+			"sort":      "relevance",
+			"analyzes":  []string{"TP.Value.6"},
+			"trueCount": false,
+			"locale":    "en",
 		},
 	}
 
@@ -394,22 +449,22 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 
 	url := fmt.Sprintf("https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID=%s", sid)
 	payload := map[string]interface{}{
-		"product":	"WOSCC",
-		"searchMode":	"general",
-		"viewType":	"search",
-		"serviceMode":	"summary",
+		"product":     "WOSCC",
+		"searchMode":  "general",
+		"viewType":    "search",
+		"serviceMode": "summary",
 		"search": map[string]interface{}{
-			"mode":		"general",
-			"database":	"WOSCC",
-			"query":	[]map[string]interface{}{{"rowField": "UT", "rowText": wosId}},
+			"mode":     "general",
+			"database": "WOSCC",
+			"query":    []map[string]interface{}{{"rowField": "UT", "rowText": wosId}},
 		},
 		"retrieve": map[string]interface{}{
-			"first":	1,
-			"count":	1,
-			"history":	false,
-			"jcr":		true,
-			"sort":		"relevance",
-			"locale":	"en",
+			"first":   1,
+			"count":   1,
+			"history": false,
+			"jcr":     true,
+			"sort":    "relevance",
+			"locale":  "en",
 		},
 	}
 
@@ -447,4 +502,3 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 	resJson, _ := json.MarshalIndent(recordsData, "", "  ")
 	return mcp.NewToolResultText(string(resJson)), nil
 }
-

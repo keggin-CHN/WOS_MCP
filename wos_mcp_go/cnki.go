@@ -53,16 +53,16 @@ func extractReturnURL(captchaSource string) string {
 
 // CnkiResult represents a single CNKI search result.
 type CnkiResult struct {
-	Title		string
-	Authors		string
-	Source		string
-	Date		string
-	URL		string
-	Abstract	string
-	DOI		string
-	Filename	string
-	DBName		string
-	DBCode		string
+	Title    string
+	Authors  string
+	Source   string
+	Date     string
+	URL      string
+	Abstract string
+	DOI      string
+	Filename string
+	DBName   string
+	DBCode   string
 }
 
 // CnkiClient handles CNKI session management and search.
@@ -75,9 +75,9 @@ func NewCnkiClient() *CnkiClient {
 	jar, _ := newCookieJar()
 	return &CnkiClient{
 		session: &http.Client{
-			Jar:		jar,
-			Timeout:	30 * time.Second,
-			Transport:	newUTLSTransport(),
+			Jar:       jar,
+			Timeout:   30 * time.Second,
+			Transport: newUTLSTransport(),
 		},
 	}
 }
@@ -454,11 +454,11 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 	referer := fmt.Sprintf("https://kns.cnki.net/verify/home?captchaType=blockPuzzle&ident=%s&captchaId=%s", ident, captchaID)
 
 	dataGet := map[string]interface{}{
-		"captchaType":	"blockPuzzle",
-		"clientUid":	fmt.Sprintf("slider-uuid-%d", time.Now().UnixMilli()),
-		"ident":	ident,
-		"captchaId":	captchaID,
-		"ts":		time.Now().UnixMilli(),
+		"captchaType": "blockPuzzle",
+		"clientUid":   fmt.Sprintf("slider-uuid-%d", time.Now().UnixMilli()),
+		"ident":       ident,
+		"captchaId":   captchaID,
+		"ts":          time.Now().UnixMilli(),
 	}
 
 	jsonData, _ := json.Marshal(dataGet)
@@ -529,13 +529,13 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 		encrypted := encryptAESECB(pointStr, secretKey)
 
 		checkData := map[string]interface{}{
-			"captchaType":	"blockPuzzle",
-			"pointJson":	encrypted,
-			"token":	token,
-			"ident":	ident,
-			"captchaId":	captchaID,
-			"clientUid":	fmt.Sprintf("slider-uuid-%d", time.Now().UnixMilli()),
-			"ts":		time.Now().UnixMilli(),
+			"captchaType": "blockPuzzle",
+			"pointJson":   encrypted,
+			"token":       token,
+			"ident":       ident,
+			"captchaId":   captchaID,
+			"clientUid":   fmt.Sprintf("slider-uuid-%d", time.Now().UnixMilli()),
+			"ts":          time.Now().UnixMilli(),
 		}
 
 		checkJSON, _ := json.Marshal(checkData)
@@ -786,11 +786,11 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 	throttleCnkiSearch()
 
 	stMap := map[string]string{
-		"主题":	"SU",
-		"篇名":	"TI",
-		"全文":	"KY",
-		"作者":	"AU",
-		"机构":	"AF",
+		"主题": "SU",
+		"篇名": "TI",
+		"全文": "KY",
+		"作者": "AU",
+		"机构": "AF",
 	}
 	stCode, ok := stMap[searchType]
 	if !ok {
@@ -798,36 +798,36 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 	}
 
 	queryJSON := map[string]interface{}{
-		"Platform":	"",
-		"Resource":	"CROSSDB",
-		"Classid":	"WD0FTY92",
-		"Products":	"",
+		"Platform": "",
+		"Resource": "CROSSDB",
+		"Classid":  "WD0FTY92",
+		"Products": "",
 		"QNode": map[string]interface{}{
 			"QGroup": []map[string]interface{}{
 				{
-					"Key":		"Subject",
-					"Title":	"",
-					"Logic":	0,
+					"Key":   "Subject",
+					"Title": "",
+					"Logic": 0,
 					"Items": []map[string]interface{}{
 						{
-							"Field":	stCode,
-							"Value":	query,
-							"Operator":	"TOPRANK",
-							"Logic":	0,
-							"Title":	"检索项",
+							"Field":    stCode,
+							"Value":    query,
+							"Operator": "TOPRANK",
+							"Logic":    0,
+							"Title":    "检索项",
 						},
 					},
-					"ChildItems":	[]interface{}{},
+					"ChildItems": []interface{}{},
 				},
 			},
 		},
-		"ExScope":	1,
-		"SearchType":	2,
-		"Rlang":	"CHINESE",
-		"KuaKuCode":	"YSTT4HG0,LSTPFY1C,EMRPGLPA,JUP3MUPD,MPMFIG1A,WQ0UVIAA,BLZOG7CK,PWFIRAGL,NN3FJMUV,NLBO1Z6R",
-		"Expands":	map[string]interface{}{},
-		"View":		"changeDBCh",
-		"SearchFrom":	1,
+		"ExScope":    1,
+		"SearchType": 2,
+		"Rlang":      "CHINESE",
+		"KuaKuCode":  "YSTT4HG0,LSTPFY1C,EMRPGLPA,JUP3MUPD,MPMFIG1A,WQ0UVIAA,BLZOG7CK,PWFIRAGL,NN3FJMUV,NLBO1Z6R",
+		"Expands":    map[string]interface{}{},
+		"View":       "changeDBCh",
+		"SearchFrom": 1,
 	}
 	qjBytes, _ := json.Marshal(queryJSON)
 	encodedQJ := url.QueryEscape(string(qjBytes))
@@ -1051,16 +1051,16 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 		}
 
 		results = append(results, CnkiResult{
-			Title:		title,
-			Authors:	strings.Join(authors, "; "),
-			Source:		source,
-			Date:		date,
-			URL:		resultURL,
-			Abstract:	abstract,
-			DOI:		doi,
-			Filename:	filename,
-			DBName:		dbname,
-			DBCode:		dbcode,
+			Title:    title,
+			Authors:  strings.Join(authors, "; "),
+			Source:   source,
+			Date:     date,
+			URL:      resultURL,
+			Abstract: abstract,
+			DOI:      doi,
+			Filename: filename,
+			DBName:   dbname,
+			DBCode:   dbcode,
 		})
 	})
 

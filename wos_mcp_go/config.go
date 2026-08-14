@@ -15,9 +15,9 @@ import (
 )
 
 var (
-	ConfigPath	string
-	KeyPath		string
-	keyCache	[]byte
+	ConfigPath string
+	KeyPath    string
+	keyCache   []byte
 )
 
 func initPaths() {
@@ -67,13 +67,13 @@ func LoadConfig() Config {
 // OrderedConfig defines the order of fields in config.json
 // Matches Python config.example.json standard exactly
 type OrderedConfig struct {
-	Username	string			`json:"username"`
-	Password	string			`json:"password,omitempty"`
-	Port		int			`json:"port"`
-	DownloadPath	string			`json:"download_path"`
-	WosSid		string			`json:"wos_sid"`
-	WosCookies	map[string]interface{}	`json:"wos_cookies"`
-	CnkiCookies	map[string]interface{}	`json:"cnki_cookies"`
+	Username     string                 `json:"username"`
+	Password     string                 `json:"password,omitempty"`
+	Port         int                    `json:"port"`
+	DownloadPath string                 `json:"download_path"`
+	WosSid       string                 `json:"wos_sid"`
+	WosCookies   map[string]interface{} `json:"wos_cookies"`
+	CnkiCookies  map[string]interface{} `json:"cnki_cookies"`
 }
 
 func getStr(cfg Config, key string) string {
@@ -113,13 +113,13 @@ func SaveConfig(cfg Config) error {
 	}
 
 	oc := OrderedConfig{
-		Username:	getStr(cfg, "username"),
-		Password:	pwd,
-		Port:		getInt(cfg, "port", 5000),
-		DownloadPath:	getStr(cfg, "download_path"),
-		WosSid:		getStr(cfg, "wos_sid"),
-		WosCookies:	getMap(cfg, "wos_cookies"),
-		CnkiCookies:	getMap(cfg, "cnki_cookies"),
+		Username:     getStr(cfg, "username"),
+		Password:     pwd,
+		Port:         getInt(cfg, "port", 5000),
+		DownloadPath: getStr(cfg, "download_path"),
+		WosSid:       getStr(cfg, "wos_sid"),
+		WosCookies:   getMap(cfg, "wos_cookies"),
+		CnkiCookies:  getMap(cfg, "cnki_cookies"),
 	}
 	if oc.DownloadPath == "" {
 		oc.DownloadPath = "download"
