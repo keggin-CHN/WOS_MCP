@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -80,8 +82,7 @@ func backgroundMaintainer() {
 	}
 }
 
-func main() {
-	go backgroundMaintainer()
+func setupServer() *server.MCPServer {
 	s := server.NewMCPServer(
 		"Academic_WoS_CNKI",
 		"1.0.0",
@@ -105,11 +106,103 @@ func main() {
 		mcp.WithNumber("limit", mcp.Description("Number of results to return")),
 	), searchCnkiHandler)
 
-	fmt.Fprintf(os.Stderr, "Starting MCP server on stdio...\n")
+	s.AddTool(mcp.NewTool("download_literature",
+		mcp.WithDescription("Download literature via Unpaywall OA links."),
+		mcp.WithString("doi_or_wosid", mcp.Required(), mcp.Description("DOI or WOS ID")),
+	), downloadLiteratureHandler)
 
-	if err := server.ServeStdio(s); err != nil {
-		fmt.Printf("Server error: %v\n", err)
+	s.AddTool(mcp.NewTool("export_wos_papers",
+		mcp.WithDescription("Export WOS papers."),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
+		mcp.WithNumber("limit", mcp.Description("Limit")),
+		mcp.WithString("year_range", mcp.Description("Year Range")),
+		mcp.WithString("doc_type", mcp.Description("Document Type")),
+		mcp.WithString("format", mcp.Description("Format (default bibtex)")),
+	), exportWosPapersHandler)
+
+	s.AddTool(mcp.NewTool("get_cnki_paper_detail",
+		mcp.WithDescription("获取知网论文详情（摘要、作者、关键词等），自动绕过验证码限制"),
+		mcp.WithString("url", mcp.Required(), mcp.Description("CNKI paper URL")),
+		mcp.WithString("title", mcp.Description("（可选）文章标题，提供时直接通过搜索获取详情，更可靠")),
+	), getCnkiPaperDetailHandler)
+
+	s.AddTool(mcp.NewTool("find_best_match",
+		mcp.WithDescription("在知网搜索并返回最匹配结果"),
+		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
+		mcp.WithString("search_type", mcp.Description("搜索类型（主题/篇名/作者/关键词）")),
+		mcp.WithNumber("limit", mcp.Description("结果数量 (default 5)")),
+	), searchCnkiHandler)
+
+	s.AddTool(mcp.NewTool("format_citation",
+		mcp.WithDescription("Format citation string"),
+		mcp.WithString("title", mcp.Required(), mcp.Description("Title")),
+		mcp.WithString("authors", mcp.Required(), mcp.Description("Authors")),
+		mcp.WithString("source", mcp.Required(), mcp.Description("Source")),
+		mcp.WithString("year", mcp.Required(), mcp.Description("Year")),
+	), formatCitationHandler)
+
+	s.AddTool(mcp.NewTool("export_cnki_papers",
+		mcp.WithDescription("Export CNKI papers"),
+		mcp.WithString("papers_json", mcp.Required(), mcp.Description("Papers JSON string")),
+		mcp.WithString("format", mcp.Description("Format")),
+	), exportCnkiPapersHandler)
+
+	s.AddResource(mcp.NewResource("cnki://status",
+		"CNKI Server Status",
+		mcp.WithMIMEType("application/json"),
+	), getStatusResourceHandler)
+
+	s.AddResource(mcp.NewResource("cnki://search-types",
+		"CNKI Search Types",
+		mcp.WithMIMEType("application/json"),
+	), getSearchTypesResourceHandler)
+
+	return s
+}
+
+func main() {
+	f, _ := os.OpenFile("C:\\Users\\asus\\OneDrive\\Desktop\\WOS MCP\\debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if f != nil {
+		os.Stderr = f
+		os.Stdout = f
+		log.SetOutput(f)
 	}
+
+	go backgroundMaintainer()
+	
+	// Read config for SSE port
+	cfg := LoadConfig()
+	portF, _ := cfg["port"].(float64)
+	port := int(portF)
+	if port == 0 {
+		port = 7861
+	}
+	listenPublic, _ := cfg["listen_public"].(bool)
+	host := "127.0.0.1"
+	if listenPublic {
+		host = "0.0.0.0"
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+
+	// Start SSE server in a goroutine
+	sseServer := server.NewSSEServer(setupServer())
+	go func() {
+		fmt.Fprintf(os.Stderr, "[SSE] Starting SSE server on %s\n", addr)
+		if err := sseServer.Start(addr); err != nil {
+			fmt.Fprintf(os.Stderr, "[SSE] Server error: %v\n", err)
+		}
+	}()
+
+	// Start Stdio server on main thread
+	fmt.Fprintf(os.Stderr, "[Stdio] Starting MCP server on stdio...\n")
+	if err := server.ServeStdio(setupServer()); err != nil {
+		fmt.Fprintf(os.Stderr, "[Stdio] Server error (or stdin closed): %v\n", err)
+	}
+	
+	// Block forever without causing a deadlock panic
+	var wg sync.WaitGroup
+	wg.Add(1)
+	wg.Wait()
 }
 
 func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -355,35 +448,3 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 	return mcp.NewToolResultText(string(resJson)), nil
 }
 
-func searchCnkiHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
-	}
-	query, ok := args["query"].(string)
-	if !ok {
-		return mcp.NewToolResultError("query is required"), nil
-	}
-
-	limitF, ok := args["limit"].(float64)
-	limit := 10
-	if ok && limitF > 0 {
-		limit = int(limitF)
-	}
-
-	results, err := cnkiClient.Search(query, "SU", limit)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-
-	if len(results) == 0 {
-		return mcp.NewToolResultText("Found 0 results on CNKI."), nil
-	}
-
-	out := fmt.Sprintf("Found results on CNKI.\n\n| # | Title | Authors | Source | Date | URL |\n|---|-------|---------|--------|------|-----|\n")
-	for i, r := range results {
-		out += fmt.Sprintf("| %d | %s | %s | %s | %s | %s |\n", i+1, r.Title, r.Authors, r.Source, r.Date, r.URL)
-	}
-
-	return mcp.NewToolResultText(out), nil
-}

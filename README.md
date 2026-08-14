@@ -1,69 +1,64 @@
 # WOS & CNKI MCP Server
 
-这是一个强大的 MCP (Model Context Protocol) 服务端，支持直接检索 **Web of Science (WOS)** 以及 **CNKI (中国知网)** 的学术文献。
+用 **Go** 实现的 MCP 服务端，检索 **Web of Science** 与 **CNKI (中国知网)** 文献，并免人机验证获取 CNKI 文章摘要。
 
-## 主要功能
+## 功能
 
-- **Web of Science 检索**: 支持核心合集文献搜索、元数据提取。
-- **CNKI 检索**: 支持知网中文文献的高效检索。
-- **自动登录/SSO 支持**: 包含应对南京林业大学登录，且底层实现了**自动极速突破知网高频弹出的动态滑块验证码**机制，最高支持 100 级极速高并发，真正零干预！
+- **WOS 检索**：核心合集文献搜索、元数据提取、Unpaywall Open Access 下载。
+- **CNKI 检索 + 免验证摘要**：机构 SSO 纯协议登录拿到 `LID` 令牌，文章详情页直接放行、全程无人机验证；内置限流与"被拦自动重登"，抗知网频率风控。
+- **双传输**：SSE (HTTP) + stdio，可接入 Claude Desktop 等 MCP 客户端。
 
----
-
-## 快速使用 (Windows 本地 EXE)
-
-见 Releases 页面下载最新版。
-
-1. 在 `wos_mcp.exe` 同级目录下，新建一个 `config.json` 文件：
-```json
-{
-    "username": "您的账号",
-    "port": 7861,
-    "listen_public": false
-}
-```
-2. 双击运行 `wos_mcp.exe`。
-
-> ⚠️ **密码安全说明**：
-> - 密码**不要**明文写在 `config.json` 里。首次登录后程序会把密码加密写入 `password_enc` 字段（AES-256-GCM），密钥保存在同目录 `config.key`（权限 600）或环境变量 `WOS_CONFIG_KEY` 中。
-> - 也可以完全不写密码：通过环境变量注入 `WOS_USERNAME` / `WOS_PASSWORD`。
-> - 旧版明文 `password` 字段仍会被兼容读取，但保存时会自动迁移为密文。
-
----
-
-## 服务器部署 (Linux Shell 一键脚本)
-
-如果您想将该服务部署到您的远端服务器（如 Ubuntu/CentOS），可以直接使用本仓库提供的 `deploy_remote.sh` 一键脚本：
-
-1. 克隆本仓库到服务器。
-2. 编辑 `config.json` 填入您的配置，并将 `"listen_public"` 设置为 `true`，以允许外网访问。
-3. 确保服务器已安装 Go 1.22 及以上版本环境。
-4. 赋予脚本执行权限并一键启动：
-```bash
-dos2unix deploy_remote.sh
-chmod +x deploy_remote.sh
-./deploy_remote.sh
-```
-该脚本会自动为您编译 Go 源码，并在后台以守护进程模式启动二进制服务端！
-
----
-
-## 从源码构建
-
-如果您希望自行编译 EXE 文件：
+## 快速开始 (Windows)
 
 ```bash
 cd wos_mcp_go
-go mod tidy
-go build -o ../dist/wos_mcp.exe
+go build -o wos_mcp_go.exe main.go cnki.go config.go extra_tools.go login.go slider_solver.go wos.go
+./wos_mcp_go.exe
 ```
-编译好的程序将在 `dist/` 目录下生成。
 
----
+在 `wos_mcp_go.exe` 同级目录新建 `config.json`（参考 `config.example.json`）：
 
-## 致谢 (Acknowledgments)
+```json
+{
+    "username": "您的机构账号",
+    "password": "您的密码",
+    "port": 5000,
+    "download_path": "download"
+}
+```
 
-本项目在开发过程中，深受开源社区的启发与帮助，特此致谢以下优秀的开源项目：
+启动后 SSE 端点为 `http://127.0.0.1:5000/sse`（端口由 `port` 决定），stdio 同时开启。
+
+## 接入 MCP 客户端（Claude Desktop）
+
+**Windows**：`%APPDATA%\Claude\claude_desktop_config.json`，添加：
+
+```json
+{
+  "mcpServers": {
+    "academic-search": {
+      "command": "C:\\完整路径\\wos_mcp_go.exe",
+      "args": []
+    }
+  }
+}
+```
+
+重启 Claude Desktop 后即可直接让它调用知网/WOS 搜索与摘要。
+
+## 配置说明
+
+| 字段 | 说明 |
+|---|---|
+| `username` / `password` | 机构 CAS 账号。也可用环境变量 `WOS_USERNAME` / `WOS_PASSWORD` 注入，不落盘 |
+| `port` | SSE 监听端口，默认 5000 |
+| `listen_public` | `true` 时监听 `0.0.0.0` 允许外网，默认 `127.0.0.1` |
+| `download_path` | 下载目录 |
+| `wos_sid` / `wos_cookies` / `cnki_cookies` | 会话，登录后自动刷新，无需手工填 |
+
+> ⚠️ **密码安全**：登录后账号密码会以**明文**写入 `config.json`。请勿提交 `config.json`、`config.key` 到版本库；或改用环境变量注入。
+
+## 致谢
 
 - [xxxxchaos/cnki-mcp-server](https://github.com/xxxxchaos/cnki-mcp-server)
 - [cookjohn/wos-skills](https://github.com/cookjohn/wos-skills)
