@@ -10,10 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"net/http/httputil"
 	"net/url"
 	"regexp"
 	"strings"
@@ -161,8 +161,6 @@ func NewWosLoginClient(username, password string) *WosLoginClient {
 
 func (c *WosLoginClient) doReq(req *http.Request) (*http.Response, string, *goquery.Document, error) {
 	req.Header.Set("User-Agent", userAgent)
-	dump, _ := httputil.DumpRequestOut(req, true)
-	fmt.Printf("--- HTTP REQUEST DUMP ---\n%s\n-------------------------\n", string(dump))
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return nil, "", nil, err
@@ -174,7 +172,7 @@ func (c *WosLoginClient) doReq(req *http.Request) (*http.Response, string, *goqu
 }
 
 func (c *WosLoginClient) Login() (string, map[string]string, error) {
-	fmt.Println("=== Starting WoS SSO Login ===")
+	log.Println("=== Starting WoS SSO Login ===")
 
 	req, _ := http.NewRequest("GET", wayflessURL, nil)
 	resp, body, doc, err := c.doReq(req)
@@ -222,14 +220,13 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		aesKey, _ = form.Find("input#pwdDefaultEncryptSalt").Attr("value")
 	}
 	if aesKey == "" {
-
 		re := regexp.MustCompile(`pwdDefaultEncryptSalt\s*=\s*["']([^"']{8,32})["']`)
 		m := re.FindStringSubmatch(body)
 		if len(m) > 1 {
 			aesKey = m[1]
 		}
 	}
-	fmt.Printf("Parsed: lt=%s..., execution=%s, aesKey=%s\n", lt[:min(30, len(lt))], execution, aesKey)
+	log.Printf("Parsed: lt=%s..., execution=%s, aesKey=%s\n", lt[:min(30, len(lt))], execution, aesKey)
 
 	if lt == "" || execution == "" || aesKey == "" {
 		return "", nil, errors.New("failed to parse CAS login page inputs")
@@ -241,7 +238,7 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 	respC, bodyC, _, _ := c.doReq(reqC)
 	respC.Body.Close()
 	text := strings.TrimSpace(bodyC)
-	fmt.Printf("needCaptcha response: [%s]\n", text)
+	log.Printf("needCaptcha response: [%s]\n", text)
 
 	if strings.Contains(text, "::::") {
 		parts := strings.SplitN(text, "::::", 2)
@@ -250,7 +247,7 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		}
 		if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
 			newSalt := strings.TrimSpace(parts[1])
-			fmt.Printf("Got new encryption salt from needCaptcha: %s (replacing old: %s)\n", newSalt, aesKey)
+			log.Printf("Got new encryption salt from needCaptcha: %s (replacing old: %s)\n", newSalt, aesKey)
 			aesKey = newSalt
 		}
 	} else if strings.TrimSpace(strings.ToLower(text)) == "true" {
@@ -272,14 +269,14 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 	reqL.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	reqL.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6")
 
-	fmt.Printf("POSTing login to %s\n", loginAction)
+	log.Printf("POSTing login to %s\n", loginAction)
 	resp, body, doc, err = c.doReq(reqL)
 	if err != nil {
 		return "", nil, err
 	}
 
 	finalURL = resp.Request.URL.String()
-	fmt.Printf("After CAS login, finalURL=%s\n", finalURL)
+	log.Printf("After CAS login, finalURL=%s\n", finalURL)
 	if strings.Contains(finalURL, "uia.njfu.edu.cn") && strings.Contains(finalURL, "/login") {
 		msg := strings.TrimSpace(doc.Find("#msg").Text())
 		if msg == "" {
@@ -292,7 +289,7 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 	}
 
 	if strings.Contains(finalURL, "idp-lib.njfu.edu.cn") && (strings.Contains(body, "_shib_idp_consent") || strings.Contains(finalURL, "execution=e1s2")) {
-		fmt.Println("Handling IDP Consent Page")
+		log.Println("Handling IDP Consent Page")
 		action, consentData, _ := parseAutoSubmitForm(doc)
 		if !strings.HasPrefix(action, "http") {
 			action = idpHost + action
@@ -311,7 +308,7 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 	// Step 8-9: POST SAMLResponse
 	var sid string
 	if strings.Contains(body, "SAMLResponse") {
-		fmt.Println("Detected SAMLResponse, auto-submitting...")
+		log.Println("Detected SAMLResponse, auto-submitting...")
 		action, samlData, _ := parseAutoSubmitForm(doc)
 		if !strings.HasPrefix(action, "http") {
 			action = wokHost + "/" + strings.TrimLeft(action, "/")
@@ -322,10 +319,10 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		// In Go, http.Client automatically follows redirects. The SID might be in the URL of one of the redirects.
 		var errStopRedirect = errors.New("stop: SID captured")
 		c.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			fmt.Printf("Redirect to: %s\n", req.URL.String())
+			log.Printf("Redirect to: %s\n", req.URL.String())
 			if m := regexp.MustCompile(`[?&]SID=([A-Za-z0-9]+)`).FindStringSubmatch(req.URL.String()); len(m) > 1 {
 				sid = m[1]
-				fmt.Printf("Captured SID from redirect: %s\n", sid)
+				log.Printf("Captured SID from redirect: %s\n", sid)
 			}
 
 			if sid != "" {
@@ -339,9 +336,8 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		resp, body, _, err = c.doReq(reqS)
 		c.client.CheckRedirect = nil
 		if err != nil {
-
 			if sid != "" {
-				fmt.Printf("Got error during redirect but SID already captured: %v\n", err)
+				log.Printf("Got error during redirect but SID already captured: %v\n", err)
 			} else {
 				return "", nil, err
 			}
@@ -366,7 +362,7 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		return "", nil, fmt.Errorf("failed to extract SID from final URL: %s", finalURL)
 	}
 
-	fmt.Printf("=== Login Success! SID=%s ===\n", sid)
+	log.Printf("=== Login Success! SID=%s ===\n", sid)
 
 	u, _ := url.Parse("https://www.webofscience.com")
 	cookies := make(map[string]string)

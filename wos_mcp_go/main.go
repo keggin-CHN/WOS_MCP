@@ -9,10 +9,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -56,25 +57,25 @@ func sanitizeQuery(query string) (string, error) {
 }
 
 func backgroundMaintainer() {
-	fmt.Fprintf(os.Stderr, "[Background] Session maintainer started.\n")
+	log.Println("[Background] Session maintainer started.")
 	for {
 		for {
 			_, _, err := ensureWosSession()
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "[Background] WOS Session ensured successfully.\n")
+				log.Println("[Background] WOS Session ensured successfully.")
 				break
 			}
-			fmt.Fprintf(os.Stderr, "[Background] WOS Session maintain failed: %v. Retrying in 30s...\n", err)
+			log.Printf("[Background] WOS Session maintain failed: %v. Retrying in 30s...\n", err)
 			time.Sleep(30 * time.Second)
 		}
 
 		for {
 			err := cnkiClient.ensureSession()
 			if err == nil {
-				fmt.Fprintf(os.Stderr, "[Background] CNKI Session ensured successfully.\n")
+				log.Println("[Background] CNKI Session ensured successfully.")
 				break
 			}
-			fmt.Fprintf(os.Stderr, "[Background] CNKI Session maintain failed: %v. Retrying in 30s...\n", err)
+			log.Printf("[Background] CNKI Session maintain failed: %v. Retrying in 30s...\n", err)
 			time.Sleep(30 * time.Second)
 		}
 
@@ -175,66 +176,74 @@ func main() {
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
 
-	// Log file for ongoing diagnostics. Once opened, stdout/stderr are
-	// redirected to it so the console only ever shows the banner below, and
-	// logs keep being persisted after the console is detached.
+	// Log file for ongoing diagnostics. Writes to logFile and os.Stderr,
+	// keeping os.Stdout strictly clean for MCP JSON-RPC protocol.
 	logFile := openLogFile()
 	logPath := ""
 	if logFile != nil {
 		logPath = logFile.Name()
+		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
 	}
 
-	// Startup banner — the only thing the user sees before the window closes.
-	fmt.Printf("============================================================\n")
-	fmt.Printf(" WOS & CNKI MCP Server  v1.0.0\n")
-	fmt.Printf(" 功能: Web of Science 检索 / CNKI 检索·免验证摘要\n")
-	fmt.Printf(" 后台维护: 每 2 小时自动校验并刷新 WOS / CNKI 登录 Cookie\n")
-	fmt.Printf(" ------------------------------------------------------------\n")
-	fmt.Printf(" SSE 端点 : http://%s/sse\n", addr)
-	if logPath != "" {
-		fmt.Printf(" 日志文件 : %s\n", logPath)
+	isPiped := isStdinPiped()
+
+	if !isPiped {
+		// Interactive / Double-click execution: display banner
+		fmt.Printf("============================================================\n")
+		fmt.Printf(" WOS & CNKI MCP Server  v1.0.0\n")
+		fmt.Printf(" 功能: Web of Science 检索 / CNKI 检索·免验证摘要\n")
+		fmt.Printf(" 后台维护: 每 2 小时自动校验并刷新 WOS / CNKI 登录 Cookie\n")
+		fmt.Printf(" ------------------------------------------------------------\n")
+		fmt.Printf(" SSE 端点 : http://%s/sse\n", addr)
+		if logPath != "" {
+			fmt.Printf(" 日志文件 : %s\n", logPath)
+		} else {
+			fmt.Printf(" 日志文件 : (打开失败, 输出保持到当前终端)\n")
+		}
+		fmt.Printf(" ------------------------------------------------------------\n")
+		fmt.Printf(" 本窗口将在 5 秒后自动关闭, 服务转为后台静默运行。\n")
+		fmt.Printf(" 需要停止时, 请在任务管理器中结束 wos_mcp_go.exe\n")
+		fmt.Printf("============================================================\n")
+
+		// Close the console window 5s after launch so the server keeps running
+		// silently in the background (Windows only; no-op elsewhere).
+		go func() {
+			time.Sleep(5 * time.Second)
+			detachConsole()
+		}()
 	} else {
-		fmt.Printf(" 日志文件 : (打开失败, 输出保持到当前终端)\n")
-	}
-	fmt.Printf(" ------------------------------------------------------------\n")
-	fmt.Printf(" 本窗口将在 5 秒后自动关闭, 服务转为后台静默运行。\n")
-	fmt.Printf(" 需要停止时, 请在任务管理器中结束 wos_mcp_go.exe\n")
-	fmt.Printf("============================================================\n")
-
-	if logFile != nil {
-		os.Stderr = logFile
-		os.Stdout = logFile
-		log.SetOutput(logFile)
+		log.Printf("[Main] Stdio pipe detected; running in Stdio MCP mode (SSE also active on %s)\n", addr)
 	}
 
 	go backgroundMaintainer()
 
-	// Start SSE server in a goroutine
-	sseServer := server.NewSSEServer(setupServer())
+	// Start SSE server with automatic retry/recovery loop
 	go func() {
-		fmt.Fprintf(os.Stderr, "[SSE] Starting SSE server on %s\n", addr)
-		if err := sseServer.Start(addr); err != nil {
-			fmt.Fprintf(os.Stderr, "[SSE] Server error: %v\n", err)
+		for {
+			log.Printf("[SSE] Starting SSE server on %s\n", addr)
+			sseServer := server.NewSSEServer(setupServer())
+			if err := sseServer.Start(addr); err != nil {
+				log.Printf("[SSE] Server error: %v. Restarting in 2s...\n", err)
+				time.Sleep(2 * time.Second)
+			} else {
+				break
+			}
 		}
 	}()
 
-	// Close the console window 5s after launch so the server keeps running
-	// silently in the background (Windows only; no-op elsewhere).
-	go func() {
-		time.Sleep(5 * time.Second)
-		detachConsole()
-	}()
-
-	// Start Stdio server on main thread
-	fmt.Fprintf(os.Stderr, "[Stdio] Starting MCP server on stdio...\n")
-	if err := server.ServeStdio(setupServer()); err != nil {
-		fmt.Fprintf(os.Stderr, "[Stdio] Server error (or stdin closed): %v\n", err)
+	if isPiped {
+		// Stdio MCP mode: run Stdio server on main thread
+		log.Println("[Stdio] Starting MCP server on stdio...")
+		if err := server.ServeStdio(setupServer()); err != nil {
+			log.Printf("[Stdio] Stdio session ended: %v\n", err)
+		}
+	} else {
+		// Standalone execution: wait for exit signal
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		log.Println("[Main] Server shutting down.")
 	}
-
-	// Block forever without causing a deadlock panic
-	var wg sync.WaitGroup
-	wg.Add(1)
-	wg.Wait()
 }
 
 // openLogFile opens (creating as needed) the debug log file. Prefers the

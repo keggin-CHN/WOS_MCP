@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -556,15 +557,15 @@ func searchAndReturnDetail(client *CnkiClient, title, originalURL string) (*mcp.
 			if accessible {
 				// Page loaded but had no abstract -> not a detail page. Re-search
 				// for a fresh URL; re-login would not help here.
-				fmt.Printf("CNKI title-path: page loaded without abstract (%s), re-searching\n", result.URL)
+				log.Printf("CNKI title-path: page loaded without abstract (%s), re-searching\n", result.URL)
 			} else {
 				// verify/home -> session flagged by frequency control. A fresh
 				// LID via re-login is the most likely fix (handoff §4.1).
 				if fresh, err := reloginFresh(); err == nil {
 					client, sess = fresh, fresh.session
-					fmt.Println("CNKI title-path: re-logged in, retrying with fresh LID")
+					log.Println("CNKI title-path: re-logged in, retrying with fresh LID")
 				} else {
-					fmt.Printf("CNKI title-path: re-login failed: %v\n", err)
+					log.Printf("CNKI title-path: re-login failed: %v\n", err)
 				}
 			}
 			result = nil // next round gets a brand-new search URL

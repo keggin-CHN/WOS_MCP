@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -34,7 +35,7 @@ func ensureWosSession() (string, map[string]string, error) {
 		return sid, cookies, nil
 	}
 
-	fmt.Println("WOS session expired or not found, logging in...")
+	log.Println("WOS session expired or not found, logging in...")
 	username, password := GetCredentials(cfg)
 	if username == "" || password == "" {
 		return "", nil, errors.New("WOS credentials not configured in config.json or env")

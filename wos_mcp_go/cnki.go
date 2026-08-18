@@ -12,6 +12,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -202,7 +203,7 @@ func serializedDetailFetch(fn func()) {
 	cnkiDetailMu.Lock()
 	defer cnkiDetailMu.Unlock()
 	if wait := cnkiDetailGap - time.Since(lastCnkiDetailAt); wait > 0 {
-		fmt.Printf("CNKI throttle: sleeping %v before detail fetch\n", wait)
+		log.Printf("CNKI throttle: sleeping %v before detail fetch\n", wait)
 		time.Sleep(wait)
 	}
 	lastCnkiDetailAt = time.Now()
@@ -241,7 +242,7 @@ func reloginFresh() (*CnkiClient, error) {
 				}
 			}
 			fresh.session.Jar.SetCookies(u, cookies)
-			fmt.Println("CNKI relogin: reusing cookies from recent fresh login")
+			log.Println("CNKI relogin: reusing cookies from recent fresh login")
 			return fresh, nil
 		}
 	}
@@ -281,12 +282,12 @@ func reloginFresh() (*CnkiClient, error) {
 	SetCredentials(cfg, username, password)
 	SaveConfig(cfg)
 	lastReloginAt = time.Now()
-	fmt.Println("CNKI relogin complete (fresh LID issued)")
+	log.Println("CNKI relogin complete (fresh LID issued)")
 	return fresh, nil
 }
 
 func (c *CnkiClient) login(username, password string) error {
-	fmt.Println("Authenticating CNKI via SSO...")
+	log.Println("Authenticating CNKI via SSO...")
 
 	providerID := url.QueryEscape("https://fsso.cnki.net/shibboleth")
 	target := url.QueryEscape("https://www.cnki.net")
@@ -439,17 +440,17 @@ func (c *CnkiClient) login(username, password string) error {
 	if respF, errF := c.session.Do(reqFSSO); errF == nil {
 		io.Copy(io.Discard, respF.Body)
 		respF.Body.Close()
-		fmt.Println("CNKI fsso callback done (LID/Ecp_ClientId acquired)")
+		log.Println("CNKI fsso callback done (LID/Ecp_ClientId acquired)")
 	}
 
-	fmt.Println("CNKI login successful!")
+	log.Println("CNKI login successful!")
 	return nil
 }
 
 // solveCaptcha solves CNKI slider captcha using image processing.
 // Pure Go port of the Python OpenCV-based solver (_solve_slider + _do_captcha_verify).
 func solveCaptcha(session *http.Client, ident, captchaID string) bool {
-	fmt.Printf("Triggering CAPTCHA bypass for ident=%s, captchaId=%s\n", ident, captchaID)
+	log.Printf("Triggering CAPTCHA bypass for ident=%s, captchaId=%s\n", ident, captchaID)
 
 	referer := fmt.Sprintf("https://kns.cnki.net/verify/home?captchaType=blockPuzzle&ident=%s&captchaId=%s", ident, captchaID)
 
@@ -470,7 +471,7 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 
 	resp, err := session.Do(req)
 	if err != nil {
-		fmt.Println("Captcha get failed:", err)
+		log.Println("Captcha get failed:", err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -481,7 +482,7 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 
 	data, ok := result["data"].(map[string]interface{})
 	if !ok {
-		fmt.Println("Captcha data missing")
+		log.Println("Captcha data missing")
 		return false
 	}
 
@@ -494,34 +495,34 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 	}
 
 	if bgB64 == "" || sliderB64 == "" {
-		fmt.Println("Captcha images missing")
+		log.Println("Captcha images missing")
 		return false
 	}
 
 	bgBytes, err := base64.StdEncoding.DecodeString(bgB64)
 	if err != nil {
-		fmt.Println("Failed to decode bg image:", err)
+		log.Println("Failed to decode bg image:", err)
 		return false
 	}
 	sliderBytes, err := base64.StdEncoding.DecodeString(sliderB64)
 	if err != nil {
-		fmt.Println("Failed to decode slider image:", err)
+		log.Println("Failed to decode slider image:", err)
 		return false
 	}
 
 	bgImg, _, err := image.Decode(bytes.NewReader(bgBytes))
 	if err != nil {
-		fmt.Println("Failed to decode bg image format:", err)
+		log.Println("Failed to decode bg image format:", err)
 		return false
 	}
 	sliderImg, _, err := image.Decode(bytes.NewReader(sliderBytes))
 	if err != nil {
-		fmt.Println("Failed to decode slider image format:", err)
+		log.Println("Failed to decode slider image format:", err)
 		return false
 	}
 
 	offsetX := solveSliderOffset(bgImg, sliderImg)
-	fmt.Printf("Computed slider offset: %d\n", offsetX)
+	log.Printf("Computed slider offset: %d\n", offsetX)
 
 	for _, adj := range []int{0, 1, -1, 2, -2, 3, -3} {
 		x := offsetX + adj
@@ -555,13 +556,13 @@ func solveCaptcha(session *http.Client, ident, captchaID string) bool {
 		var checkResult map[string]interface{}
 		json.Unmarshal(bodyCheck, &checkResult)
 		if success, ok := checkResult["success"].(bool); ok && success {
-			fmt.Printf("CAPTCHA bypass success with offset %d\n", x)
+			log.Printf("CAPTCHA bypass success with offset %d\n", x)
 			return true
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 
-	fmt.Println("CAPTCHA bypass failed after all attempts")
+	log.Println("CAPTCHA bypass failed after all attempts")
 	return false
 }
 
@@ -659,7 +660,7 @@ func runClickWordSolver(imgBytes []byte, wordList []string) ([][2]int, error) {
 // returnUrl query param from the verify/home redirect that triggered the
 // challenge. Without it the server rejects with 6111.
 func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bool {
-	fmt.Printf("Triggering clickWord CAPTCHA solve for ident=%s, captchaId=%s\n", ident, captchaID)
+	log.Printf("Triggering clickWord CAPTCHA solve for ident=%s, captchaId=%s\n", ident, captchaID)
 
 	referer := fmt.Sprintf("https://kns.cnki.net/verify/home?captchaType=clickWord&ident=%s&captchaId=%s", ident, captchaID)
 	if returnUrl != "" {
@@ -681,7 +682,7 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 
 	resp, err := session.Do(req)
 	if err != nil {
-		fmt.Println("clickWord get failed:", err)
+		log.Println("clickWord get failed:", err)
 		return false
 	}
 	defer resp.Body.Close()
@@ -689,12 +690,12 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 
 	var result map[string]interface{}
 	if err := json.Unmarshal(body, &result); err != nil {
-		fmt.Printf("clickWord get bad JSON: %v\n%s\n", err, body)
+		log.Printf("clickWord get bad JSON: %v\n%s\n", err, body)
 		return false
 	}
 	data, ok := result["data"].(map[string]interface{})
 	if !ok {
-		fmt.Printf("clickWord data missing: %s\n", body)
+		log.Printf("clickWord data missing: %s\n", body)
 		return false
 	}
 
@@ -705,17 +706,17 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 	// do not fall back to it — retry with a fresh challenge instead.
 	secretKey, _ := data["secretKey"].(string)
 	if secretKey == "" {
-		fmt.Printf("clickWord secretKey missing, retry new challenge\n")
+		log.Printf("clickWord secretKey missing, retry new challenge\n")
 		return false
 	}
 	if bgB64 == "" {
-		fmt.Printf("clickWord data incomplete (no image): %s\n", body)
+		log.Printf("clickWord data incomplete (no image): %s\n", body)
 		return false
 	}
 
 	imgBytes, err := base64.StdEncoding.DecodeString(bgB64)
 	if err != nil {
-		fmt.Println("clickWord decode image failed:", err)
+		log.Println("clickWord decode image failed:", err)
 		return false
 	}
 
@@ -728,17 +729,17 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 		}
 	}
 	if len(wordList) == 0 {
-		fmt.Printf("clickWord wordList empty: %s\n", body)
+		log.Printf("clickWord wordList empty: %s\n", body)
 		return false
 	}
-	fmt.Printf("clickWord wordList: %v\n", wordList)
+	log.Printf("clickWord wordList: %v\n", wordList)
 
 	points, err := runClickWordSolver(imgBytes, wordList)
 	if err != nil {
-		fmt.Println(err)
+		log.Println(err)
 		return false
 	}
-	fmt.Printf("clickWord points: %v\n", points)
+	log.Printf("clickWord points: %v\n", points)
 
 	encrypted := encryptAESECB(pointListJSON(points), secretKey)
 	// Body mirrors the real manual submission (capture [16]) field-for-field:
@@ -761,7 +762,7 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 
 	respCheck, err := session.Do(reqCheck)
 	if err != nil {
-		fmt.Println("clickWord check failed:", err)
+		log.Println("clickWord check failed:", err)
 		return false
 	}
 	defer respCheck.Body.Close()
@@ -769,10 +770,10 @@ func solveClickWord(session *http.Client, ident, captchaID, returnUrl string) bo
 	var checkResult map[string]interface{}
 	json.Unmarshal(bodyCheck, &checkResult)
 	if success, ok := checkResult["success"].(bool); ok && success {
-		fmt.Printf("clickWord CAPTCHA bypass success!\n")
+		log.Printf("clickWord CAPTCHA bypass success!\n")
 		return true
 	}
-	fmt.Printf("clickWord check rejected: %s\n", bodyCheck)
+	log.Printf("clickWord check rejected: %s\n", bodyCheck)
 	return false
 }
 
@@ -901,7 +902,7 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 							solved = true
 							break
 						}
-						fmt.Printf("Captcha attempt %d failed, retrying with new image...\n", c_attempt+1)
+						log.Printf("Captcha attempt %d failed, retrying with new image...\n", c_attempt+1)
 						time.Sleep(500 * time.Millisecond)
 					}
 					if solved {
@@ -916,7 +917,7 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 						cfg["cnki_cookies"] = cookieMap
 						SaveConfig(cfg)
 					} else {
-						fmt.Printf("CAPTCHA bypass failed after all attempts\n")
+						log.Println("CAPTCHA bypass failed after all attempts")
 					}
 				}
 			}
@@ -945,7 +946,7 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 							solved = true
 							break
 						}
-						fmt.Printf("clickWord attempt %d failed, retrying with new image...\n", c_attempt+1)
+						log.Printf("clickWord attempt %d failed, retrying with new image...\n", c_attempt+1)
 						time.Sleep(800 * time.Millisecond)
 					}
 					if solved {
@@ -959,7 +960,7 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 						cfg["cnki_cookies"] = cookieMap
 						SaveConfig(cfg)
 					} else {
-						fmt.Printf("clickWord CAPTCHA bypass failed after all attempts\n")
+						log.Println("clickWord CAPTCHA bypass failed after all attempts")
 					}
 				}
 			}
@@ -988,10 +989,6 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 	rows.Each(func(i int, s *goquery.Selection) {
 		if i >= limit {
 			return
-		}
-		if i == 0 {
-			html, _ := s.Html()
-			fmt.Printf("DEBUG ROW 0 HTML: %s\n", html)
 		}
 		titleElem := s.Find("td.name a")
 		if titleElem.Length() == 0 {

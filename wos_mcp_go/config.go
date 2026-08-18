@@ -8,8 +8,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -53,12 +53,12 @@ func LoadConfig() Config {
 	}
 	data, err := os.ReadFile(ConfigPath)
 	if err != nil {
-		fmt.Printf("Error reading config: %v\n", err)
+		log.Printf("Error reading config: %v\n", err)
 		return make(Config)
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		fmt.Printf("Error unmarshaling config: %v\n", err)
+		log.Printf("Error unmarshaling config: %v\n", err)
 		return make(Config)
 	}
 	return cfg
@@ -153,9 +153,9 @@ func getKey() []byte {
 		panic("Failed to generate random key")
 	}
 	if err := os.WriteFile(KeyPath, keyCache, 0600); err != nil {
-		fmt.Printf("[config_util] Failed to write key file: %v\n", err)
+		log.Printf("[config_util] Failed to write key file: %v\n", err)
 	} else {
-		fmt.Printf("[config_util] Generated config key file: %s (Do not share/delete)\n", KeyPath)
+		log.Printf("[config_util] Generated config key file: %s (Do not share/delete)\n", KeyPath)
 	}
 	return keyCache
 }
