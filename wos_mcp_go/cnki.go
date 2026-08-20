@@ -832,8 +832,18 @@ func (c *CnkiClient) Search(query, searchType string, limit int) ([]CnkiResult, 
 	}
 	qjBytes, _ := json.Marshal(queryJSON)
 	encodedQJ := url.QueryEscape(string(qjBytes))
-	payload := fmt.Sprintf("boolSearch=true&QueryJson=%s&pageNum=1&pageSize=%d&sortField=&sortType=&dstyle=abstractmode&productStr=&aside=&searchFrom=%s&subject=&language=&uniplatform=&CurPage=1",
-		encodedQJ, limit, url.QueryEscape("资源范围：总库"))
+
+	pageSize := 20
+	if limit <= 10 {
+		pageSize = 10
+	} else if limit <= 20 {
+		pageSize = 20
+	} else {
+		pageSize = 50
+	}
+
+	payload := fmt.Sprintf("boolSearch=true&QueryJson=%s&pageNum=1&pageSize=%d&sortField=&sortType=&dstyle=listmode&productStr=&aside=&searchFrom=%s&subject=&language=&uniplatform=&CurPage=1",
+		encodedQJ, pageSize, url.QueryEscape("资源范围：总库"))
 
 	var body []byte
 	var err error

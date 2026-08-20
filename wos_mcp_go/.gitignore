@@ -1,5 +1,9 @@
-wos_mcp_go.exe
+*.exe
 config.json
 config.key
+session_cache.json
+debug.log
+*.log
 download/
-
+downloads/
+*_test.go

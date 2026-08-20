@@ -140,6 +140,90 @@ func parseAutoSubmitForm(doc *goquery.Document) (string, url.Values, error) {
 	return action, data, nil
 }
 
+// locationSanitizingTransport intercepts HTTP responses and fixes malformed Location
+// headers (e.g. from Clarivate SAML redirects) before Go's net/http url.Parse fails.
+type locationSanitizingTransport struct {
+	Transport http.RoundTripper
+}
+
+func (t *locationSanitizingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tr := t.Transport
+	if tr == nil {
+		tr = http.DefaultTransport
+	}
+	resp, err := tr.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+
+	if loc := resp.Header.Get("Location"); loc != "" {
+		sanitized := sanitizeLocationHeader(loc)
+		if sanitized != loc {
+			log.Printf("[Transport] Sanitized malformed Location header:\n  Before: %s\n  After:  %s\n", loc, sanitized)
+			resp.Header.Set("Location", sanitized)
+		}
+	}
+
+	return resp, nil
+}
+
+// sanitizeLocationHeader repairs broken URLs in Location headers returned by servers.
+// For example: "https://www.webofknowledge.comundefinednull&referrer=TARGET%3D..."
+// is converted to "https://www.webofknowledge.com/?referrer=TARGET%3D...".
+func sanitizeLocationHeader(loc string) string {
+	if loc == "" {
+		return loc
+	}
+
+	// 1. Strip JS undefined/null concatenation artifacts
+	loc = strings.ReplaceAll(loc, "undefinednull", "")
+	loc = strings.ReplaceAll(loc, "undefined", "")
+
+	// 2. Fix missing / or ? between host and query parameters
+	// e.g. "https://www.webofknowledge.com&referrer=..." -> "https://www.webofknowledge.com/?referrer=..."
+	reMissingSlashOrQuery := regexp.MustCompile(`^(https?://[^/?#&]+)&(.*)$`)
+	if m := reMissingSlashOrQuery.FindStringSubmatch(loc); len(m) > 2 {
+		loc = m[1] + "/?" + m[2]
+	}
+
+	// 3. Fix "/&" without "?"
+	reSlashAmp := regexp.MustCompile(`^(https?://[^/?#]+)/&(.*)$`)
+	if m := reSlashAmp.FindStringSubmatch(loc); len(m) > 2 {
+		loc = m[1] + "/?" + m[2]
+	}
+
+	return loc
+}
+
+// extractSID extracts a Web of Science SID from a given URL, error string, or body.
+// Handles plain SID=..., single URL-encoded SID%3D..., and double URL-encoded SID%253D...
+func extractSID(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	// Direct regex: match SID=, SID%3D, SID%253D followed by alphanumeric session ID (>= 10 chars)
+	re := regexp.MustCompile(`(?i)SID(?:%253D|%3D|=)([A-Za-z0-9]+)`)
+	if m := re.FindStringSubmatch(text); len(m) > 1 && len(m[1]) >= 10 {
+		return m[1]
+	}
+
+	// Try query unescaping once
+	if unescaped, err := url.QueryUnescape(text); err == nil && unescaped != text {
+		if m := re.FindStringSubmatch(unescaped); len(m) > 1 && len(m[1]) >= 10 {
+			return m[1]
+		}
+		// Try query unescaping twice for double encoding
+		if unescaped2, err2 := url.QueryUnescape(unescaped); err2 == nil && unescaped2 != unescaped {
+			if m2 := re.FindStringSubmatch(unescaped2); len(m2) > 1 && len(m2[1]) >= 10 {
+				return m2[1]
+			}
+		}
+	}
+
+	return ""
+}
+
 type WosLoginClient struct {
 	client   *http.Client
 	username string
@@ -149,8 +233,9 @@ type WosLoginClient struct {
 func NewWosLoginClient(username, password string) *WosLoginClient {
 	jar, _ := newCookieJar()
 	client := &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second,
+		Jar:       jar,
+		Timeout:   30 * time.Second,
+		Transport: &locationSanitizingTransport{Transport: newUTLSTransport()},
 	}
 	return &WosLoginClient{
 		client:   client,
@@ -320,8 +405,8 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		var errStopRedirect = errors.New("stop: SID captured")
 		c.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 			log.Printf("Redirect to: %s\n", req.URL.String())
-			if m := regexp.MustCompile(`[?&]SID=([A-Za-z0-9]+)`).FindStringSubmatch(req.URL.String()); len(m) > 1 {
-				sid = m[1]
+			if s := extractSID(req.URL.String()); s != "" {
+				sid = s
 				log.Printf("Captured SID from redirect: %s\n", sid)
 			}
 
@@ -336,8 +421,14 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 		resp, body, _, err = c.doReq(reqS)
 		c.client.CheckRedirect = nil
 		if err != nil {
+			if sid == "" {
+				sid = extractSID(err.Error())
+				if sid != "" {
+					log.Printf("Captured SID from redirect error message: %s\n", sid)
+				}
+			}
 			if sid != "" {
-				log.Printf("Got error during redirect but SID already captured: %v\n", err)
+				log.Printf("Redirect finished with captured SID: %s (status info: %v)\n", sid, err)
 			} else {
 				return "", nil, err
 			}
@@ -348,14 +439,10 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 	}
 
 	if sid == "" {
-		if m := regexp.MustCompile(`[?&]SID=([A-Za-z0-9]+)`).FindStringSubmatch(finalURL); len(m) > 1 {
-			sid = m[1]
-		}
+		sid = extractSID(finalURL)
 	}
 	if sid == "" {
-		if m := regexp.MustCompile(`[?&]SID=([A-Za-z0-9]+)`).FindStringSubmatch(body); len(m) > 1 {
-			sid = m[1]
-		}
+		sid = extractSID(body)
 	}
 
 	if sid == "" {
@@ -364,10 +451,21 @@ func (c *WosLoginClient) Login() (string, map[string]string, error) {
 
 	log.Printf("=== Login Success! SID=%s ===\n", sid)
 
-	u, _ := url.Parse("https://www.webofscience.com")
 	cookies := make(map[string]string)
-	for _, cookie := range c.client.Jar.Cookies(u) {
-		cookies[cookie.Name] = cookie.Value
+	for _, domain := range []string{
+		"https://www.webofscience.com",
+		"https://webofscience.com",
+		"https://www.webofknowledge.com",
+		"https://webofknowledge.com",
+		"https://access.clarivate.com",
+		"https://clarivate.com",
+		"https://idp-lib.njfu.edu.cn",
+		"https://uia.njfu.edu.cn",
+	} {
+		u, _ := url.Parse(domain)
+		for _, cookie := range c.client.Jar.Cookies(u) {
+			cookies[cookie.Name] = cookie.Value
+		}
 	}
 	return sid, cookies, nil
 }

@@ -35,15 +35,18 @@ func ensureWosSession() (string, map[string]string, error) {
 		return sid, cookies, nil
 	}
 
-	log.Println("WOS session expired or not found, logging in...")
+	log.Println("[WOS] Session expired or not found, logging in...")
 	username, password := GetCredentials(cfg)
 	if username == "" || password == "" {
-		return "", nil, errors.New("WOS credentials not configured in config.json or env")
+		err := errors.New("WOS credentials not configured in config.json or env")
+		log.Printf("[WOS Error] %v\n", err)
+		return "", nil, err
 	}
 
 	client := NewWosLoginClient(username, password)
 	newSid, newCookies, err := client.Login()
 	if err != nil {
+		log.Printf("[WOS Error] Login failed: %v\n", err)
 		return "", nil, err
 	}
 
@@ -51,6 +54,7 @@ func ensureWosSession() (string, map[string]string, error) {
 	cfg["wos_cookies"] = newCookies
 	SetCredentials(cfg, username, password)
 	SaveConfig(cfg)
+	log.Printf("[WOS] Session successfully refreshed and saved. SID: %s\n", newSid)
 
 	return newSid, newCookies, nil
 }
@@ -100,7 +104,20 @@ func verifyWosSession(sid string, cookies map[string]string) bool {
 	if strings.Contains(string(body), "Server.sessionExpired") {
 		return false
 	}
-	return true
+
+	parsedData, err := parseWosResponse(body)
+	if err != nil || len(parsedData) == 0 {
+		return false
+	}
+
+	for _, item := range parsedData {
+		if key, ok := item["key"].(string); ok && key == "records" {
+			if pl, ok := item["payload"].(map[string]interface{}); ok && len(pl) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseWosResponse(body []byte) ([]map[string]interface{}, error) {

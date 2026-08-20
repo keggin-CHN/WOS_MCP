@@ -43,9 +43,11 @@ func downloadLiteratureHandler(ctx context.Context, request mcp.CallToolRequest)
 	isDoi := strings.HasPrefix(doi, "10.")
 
 	if !isDoi {
+		log.Printf("[MCP] download_literature resolving WOS ID: %s\n", doiOrWosId)
 		// Attempt to get DOI from WOS
 		sid, cookies, err := ensureWosSession()
 		if err != nil {
+			log.Printf("[MCP Error] download_literature ensureWosSession failed: %v\n", err)
 			return mcp.NewToolResultText(fmt.Sprintf("Error ensuring session: %v", err)), nil
 		}
 
@@ -191,8 +193,11 @@ func exportWosPapersHandler(ctx context.Context, request mcp.CallToolRequest) (*
 		limit = 100
 	}
 
+	log.Printf("[MCP] export_wos_papers called: query=%q, limit=%d, format=%s\n", query, limit, format)
+
 	sid, cookies, err := ensureWosSession()
 	if err != nil {
+		log.Printf("[MCP Error] export_wos_papers ensureWosSession failed: %v\n", err)
 		return mcp.NewToolResultText(fmt.Sprintf("Error ensuring session: %v", err)), nil
 	}
 
@@ -258,8 +263,11 @@ func exportWosPapersHandler(ctx context.Context, request mcp.CallToolRequest) (*
 	defer respWos.Body.Close()
 	bodyBytes, _ := io.ReadAll(respWos.Body)
 
-	// Simplified export format for demo (JSON stringified)
-	return mcp.NewToolResultText(fmt.Sprintf("Export format %s requested.\n\nRaw WOS API Response (truncated):\n%s...", format, string(bodyBytes)[:500])), nil
+	respStr := string(bodyBytes)
+	if len(respStr) > 500 {
+		respStr = respStr[:500] + "..."
+	}
+	return mcp.NewToolResultText(fmt.Sprintf("Export format %s requested.\n\nRaw WOS API Response (truncated):\n%s", format, respStr)), nil
 }
 
 // getCnkiPaperDetailHandler fetches article details via search (avoids clickWord captcha on abstract page).

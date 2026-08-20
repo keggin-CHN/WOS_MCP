@@ -246,22 +246,23 @@ func main() {
 	}
 }
 
-// openLogFile opens (creating as needed) the debug log file. Prefers the
-// existing OneDrive Desktop location, then a debug.log next to the executable,
-// then the system temp dir — so logging works even when a path is missing.
+// openLogFile opens (or truncates) the debug log file in overwrite mode.
+// Log output is written to logFile and os.Stderr, keeping os.Stdout clean for MCP JSON-RPC.
 func openLogFile() *os.File {
-	candidates := []string{
-		`C:\Users\asus\OneDrive\Desktop\WOS MCP\debug.log`, // 既有日志位置
-	}
+	var candidates []string
 	if exe, err := os.Executable(); err == nil {
 		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "debug.log"))
 	}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(cwd, "debug.log"))
+	}
 	candidates = append(candidates, filepath.Join(os.TempDir(), "wos_mcp_go_debug.log"))
+
 	for _, p := range candidates {
 		if dir := filepath.Dir(p); dir != "" {
 			_ = os.MkdirAll(dir, 0755)
 		}
-		f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err == nil {
 			return f
 		}
@@ -293,8 +294,11 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 		}
 	}
 
+	log.Printf("[MCP] search_literature called: query=%q, limit=%d\n", query, limit)
+
 	sid, cookies, err := ensureWosSession()
 	if err != nil {
+		log.Printf("[MCP Error] search_literature ensureWosSession failed: %v\n", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Session error: %v", err)), nil
 	}
 
@@ -329,7 +333,9 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(data))
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://www.webofscience.com")
+	req.Header.Set("Referer", "https://www.webofscience.com/wos/alldb/smart-search")
 	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	req.Header.Set("Accept", "application/x-ndjson, application/json, text/plain, */*")
 	for k, v := range cookies {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
@@ -451,8 +457,11 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 		return mcp.NewToolResultError("invalid wos_id format"), nil
 	}
 
+	log.Printf("[MCP] get_wos_paper_details called: wos_id=%s\n", wosId)
+
 	sid, cookies, err := ensureWosSession()
 	if err != nil {
+		log.Printf("[MCP Error] get_wos_paper_details ensureWosSession failed: %v\n", err)
 		return mcp.NewToolResultError(fmt.Sprintf("Session error: %v", err)), nil
 	}
 
@@ -480,7 +489,10 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 	data, _ := json.Marshal(payload)
 	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(data))
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Origin", "https://www.webofscience.com")
+	req.Header.Set("Referer", "https://www.webofscience.com/wos/woscc/summary")
 	req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
+	req.Header.Set("Accept", "application/x-ndjson, application/json, text/plain, */*")
 	for k, v := range cookies {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
