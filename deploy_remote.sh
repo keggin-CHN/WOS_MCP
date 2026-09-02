@@ -9,7 +9,11 @@ cd ..
 
 # Set port to 7861
 if [ -f "config.json" ]; then
-    python3 -c "import json; d=json.load(open('config.json')); d['port']=7861; d['listen_public']=True; json.dump(d, open('config.json','w'), indent=4)"
+    if command -v jq >/dev/null 2>&1; then
+        jq '.port = 7861 | .listen_public = true' config.json > config.json.tmp && mv config.json.tmp config.json
+    else
+        sed -i 's/"port": *[0-9]*/"port": 7861/' config.json
+    fi
 fi
 
 # Stop any existing instance of this server (no sudo needed for user-owned process)

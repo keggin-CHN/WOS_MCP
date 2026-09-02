@@ -1,28 +1,13 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
 # Configuration (DO NOT COMMIT PERSONAL CREDENTIALS)
 config.json
 config.key
 session_cache.json
 
 # Builds & Binaries
-build/
 dist/
-*.spec
+build/
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
@@ -31,20 +16,18 @@ dist/
 *.log
 debug.log
 
-# Downloads
+# Downloads & Sandboxes
 download/
 downloads/
 
 # IDEs & OS
 .idea/
 .vscode/
-id_rsa
 .DS_Store
+*.har
 
 # Local presentation & test files
 *.pptx
 *_test.go
 test/
 tests/
-*.har
-*.exe~
