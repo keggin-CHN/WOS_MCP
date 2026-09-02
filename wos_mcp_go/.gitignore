@@ -7,3 +7,5 @@ debug.log
 download/
 downloads/
 *_test.go
+*.har
+*.exe~

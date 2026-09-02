@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	ConfigPath string
-	KeyPath    string
-	keyCache   []byte
+	ConfigPath  string
+	KeyPath     string
+	keyCache    []byte
+	downloadDir string
 )
 
 func initPaths() {
@@ -37,6 +38,18 @@ func initPaths() {
 		ConfigPath = filepath.Join(cwd, "config.json")
 		KeyPath = filepath.Join(cwd, "config.key")
 	}
+
+	cfg := LoadConfig()
+	dpStr, ok := cfg["download_path"].(string)
+	if !ok || dpStr == "" {
+		dpStr = "download"
+	}
+	if !filepath.IsAbs(dpStr) {
+		execPath, _ := os.Executable()
+		dpStr = filepath.Join(filepath.Dir(execPath), dpStr)
+	}
+	downloadDir = dpStr
+	os.MkdirAll(downloadDir, 0755)
 }
 
 func init() {

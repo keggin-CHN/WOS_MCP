@@ -26,22 +26,7 @@ var (
 	docTypeRe   = regexp.MustCompile(`^[A-Za-z][A-Za-z \-]*$`)
 	wosIDRe     = regexp.MustCompile(`^WOS:[A-Z0-9]+$`)
 	cnkiClient  = NewCnkiClient()
-	downloadDir string
 )
-
-func init() {
-	cfg := LoadConfig()
-	dpStr, ok := cfg["download_path"].(string)
-	if !ok || dpStr == "" {
-		dpStr = "download"
-	}
-	if !filepath.IsAbs(dpStr) {
-		execPath, _ := os.Executable()
-		dpStr = filepath.Join(filepath.Dir(execPath), dpStr)
-	}
-	downloadDir = dpStr
-	os.MkdirAll(downloadDir, 0755)
-}
 
 func sanitizeQuery(query string) (string, error) {
 	if strings.TrimSpace(query) == "" {
@@ -133,6 +118,26 @@ func setupServer() *server.MCPServer {
 		mcp.WithString("search_type", mcp.Description("搜索类型（主题/篇名/作者/关键词）")),
 		mcp.WithNumber("limit", mcp.Description("结果数量 (default 5)")),
 	), searchCnkiHandler)
+
+	s.AddTool(mcp.NewTool("download_cnki_paper",
+		mcp.WithDescription("下载中国知网 (CNKI) 文献 PDF 全文至本地 download 沙盒目录，并可提取正文前 3000 字文本"),
+		mcp.WithString("url", mcp.Description("知网文献详情页 URL (如 https://kns.cnki.net/kcms2/article/abstract?v=...)")),
+		mcp.WithString("title", mcp.Description("文章标题（若未提供 URL，将自动按标题精确搜索并下载）")),
+		mcp.WithString("query", mcp.Description("检索关键词（若未提供 URL/标题，将自动搜索第 1 篇匹配文献并下载）")),
+		mcp.WithString("subfolder", mcp.Description("存放子文件夹名称（可选，如不填则存入当天日期目录或默认目录）")),
+		mcp.WithBoolean("extract_text", mcp.Description("是否同时提取并返回 PDF 前 3000 字纯文本供直接研读（默认 true）")),
+	), downloadCnkiPaperHandler)
+
+	s.AddTool(mcp.NewTool("list_downloaded_papers",
+		mcp.WithDescription("查看 download 沙盒目录下的已下载文献与文件列表"),
+		mcp.WithString("subfolder", mcp.Description("子文件夹路径（可选，留空查看整个 download 目录）")),
+	), listDownloadedPapersHandler)
+
+	s.AddTool(mcp.NewTool("read_paper_content",
+		mcp.WithDescription("读取 download 沙盒目录下指定文献文件的文本内容（支持 PDF 纯文本流提取及 txt/json 读取）"),
+		mcp.WithString("file_path", mcp.Required(), mcp.Description("文件在 download 目录下的相对路径 (如 2026-09-02/paper.pdf)")),
+		mcp.WithNumber("max_chars", mcp.Description("最大读取字符数（默认 20000）")),
+	), readPaperContentHandler)
 
 	s.AddTool(mcp.NewTool("format_citation",
 		mcp.WithDescription("Format citation string"),

@@ -88,6 +88,53 @@ var cnkiSessionLock sync.Mutex
 var captchaLock sync.Mutex
 var lastCaptchaSolveTime time.Time
 
+var cnkiDomains = []string{
+	"https://kns.cnki.net",
+	"https://bar.cnki.net",
+	"https://docdown.cnki.net",
+	"https://cnki.net",
+	"https://.cnki.net",
+	"https://fsso.cnki.net",
+	"https://login.cnki.net",
+	"https://au.cnki.net",
+}
+
+func (c *CnkiClient) injectCookiesFromMap(cookieMap map[string]interface{}) {
+	for _, domainStr := range cnkiDomains {
+		u, err := url.Parse(domainStr)
+		if err != nil {
+			continue
+		}
+		var cookies []*http.Cookie
+		for k, v := range cookieMap {
+			if vs, ok := v.(string); ok && vs != "" {
+				cookies = append(cookies, &http.Cookie{
+					Name:  k,
+					Value: vs,
+					Path:  "/",
+				})
+			}
+		}
+		c.session.Jar.SetCookies(u, cookies)
+	}
+}
+
+func (c *CnkiClient) exportCookiesToMap() map[string]interface{} {
+	cookieMap := make(map[string]interface{})
+	for _, domainStr := range cnkiDomains {
+		u, err := url.Parse(domainStr)
+		if err != nil {
+			continue
+		}
+		for _, ck := range c.session.Jar.Cookies(u) {
+			if ck.Name != "" && ck.Value != "" {
+				cookieMap[ck.Name] = ck.Value
+			}
+		}
+	}
+	return cookieMap
+}
+
 func (c *CnkiClient) ensureSession() error {
 	cnkiSessionLock.Lock()
 	defer cnkiSessionLock.Unlock()
@@ -110,13 +157,7 @@ func (c *CnkiClient) ensureSession() error {
 
 	if !hasSID || !hasLID {
 		if cookieMap, ok := cfg["cnki_cookies"].(map[string]interface{}); ok && len(cookieMap) > 0 {
-			var cookies []*http.Cookie
-			for k, v := range cookieMap {
-				if vs, ok2 := v.(string); ok2 {
-					cookies = append(cookies, &http.Cookie{Name: k, Value: vs})
-				}
-			}
-			c.session.Jar.SetCookies(u, cookies)
+			c.injectCookiesFromMap(cookieMap)
 			// re-check after injecting config
 			hasSID, hasLID = false, false
 			for _, cookie := range c.session.Jar.Cookies(u) {
@@ -154,10 +195,8 @@ func (c *CnkiClient) ensureSession() error {
 		return err
 	}
 
-	cookieMap := make(map[string]interface{})
-	for _, ck := range c.session.Jar.Cookies(u) {
-		cookieMap[ck.Name] = ck.Value
-	}
+	cookieMap := c.exportCookiesToMap()
+	c.injectCookiesFromMap(cookieMap)
 	cfg["cnki_cookies"] = cookieMap
 	SetCredentials(cfg, username, password)
 	SaveConfig(cfg)
@@ -274,28 +313,34 @@ func reloginFresh() (*CnkiClient, error) {
 		return nil, fmt.Errorf("relogin did not produce an LID cookie")
 	}
 
-	cookieMap := make(map[string]interface{})
-	for _, ck := range fresh.session.Jar.Cookies(u) {
-		cookieMap[ck.Name] = ck.Value
-	}
+	cookieMap := fresh.exportCookiesToMap()
+	fresh.injectCookiesFromMap(cookieMap)
 	cfg["cnki_cookies"] = cookieMap
 	SetCredentials(cfg, username, password)
 	SaveConfig(cfg)
 	lastReloginAt = time.Now()
-	log.Println("CNKI relogin complete (fresh LID issued)")
+	log.Println("CNKI relogin complete (fresh LID issued and injected across domains)")
 	return fresh, nil
 }
 
-func (c *CnkiClient) login(username, password string) error {
+func (c *CnkiClient) login(username string, password string) error {
 	log.Println("Authenticating CNKI via SSO...")
 
-	providerID := url.QueryEscape("https://fsso.cnki.net/shibboleth")
-	target := url.QueryEscape("https://www.cnki.net")
-	ssoURL := fmt.Sprintf("https://idp-lib.njfu.edu.cn/idp/profile/SAML2/Unsolicited/SSO?providerId=%s&target=%s", providerID, target)
+	loginClient := NewWosLoginClient(username, password)
+	loginClient.client.Jar = c.session.Jar
 
-	req, _ := http.NewRequest("GET", ssoURL, nil)
+	req, _ := http.NewRequest("GET", "https://fsso.cnki.net", nil)
 	req.Header.Set("User-Agent", userAgent)
-	resp, err := c.session.Do(req)
+	resp, err := loginClient.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("initial GET fsso.cnki.net failed: %w", err)
+	}
+	resp.Body.Close()
+
+	samlInitURL := "https://fsso.cnki.net/secure/default.aspx?entityid=" + url.QueryEscape(idpHost+"/idp/shibboleth")
+	req, _ = http.NewRequest("GET", samlInitURL, nil)
+	req.Header.Set("User-Agent", userAgent)
+	resp, err = loginClient.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("CNKI SSO trigger failed: %w", err)
 	}
@@ -306,10 +351,6 @@ func (c *CnkiClient) login(username, password string) error {
 	if !strings.Contains(finalURL, "uia.njfu.edu.cn") || !strings.Contains(finalURL, "login") {
 		return fmt.Errorf("CNKI SSO failed, URL: %s", finalURL)
 	}
-
-	loginClient := NewWosLoginClient(username, password)
-
-	loginClient.client.Jar = c.session.Jar
 
 	doc, _ := goquery.NewDocumentFromReader(bytes.NewReader(body))
 	form := doc.Find("#casLoginForm")
@@ -429,11 +470,6 @@ func (c *CnkiClient) login(username, password string) error {
 		respKNS.Body.Close()
 	}
 
-	// Critical: the browser, after SAML returns, goes through CNKI's federation
-	// callback https://fsso.cnki.net/secure/default.aspx which issues the LID +
-	// Ecp_ClientId cookies. WITHOUT these, kns.cnki.net forces clickWord captcha
-	// on every article page even when logged in. Visiting it once after login
-	// makes the session able to fetch any article abstract without captcha.
 	reqFSSO, _ := http.NewRequest("GET", "https://fsso.cnki.net/secure/default.aspx", nil)
 	reqFSSO.Header.Set("User-Agent", userAgent)
 	reqFSSO.Header.Set("Referer", "https://fsso.cnki.net/Shibboleth.sso/SAML2/POST")
@@ -1090,4 +1126,378 @@ func (c *CnkiClient) GetArticleDetail(title string) (*CnkiResult, error) {
 		return nil, fmt.Errorf("article not found")
 	}
 	return &results[0], nil
+}
+
+// FetchDetailPageHTML retrieves the HTML of a CNKI article abstract page, handling captcha if encountered.
+func (c *CnkiClient) FetchDetailPageHTML(urlStr string) (string, error) {
+	if err := c.ensureSession(); err != nil {
+		return "", err
+	}
+
+	var body []byte
+	var finalURL string
+	var resp *http.Response
+	var err error
+
+	serializedDetailFetch(func() {
+		req, errReq := http.NewRequest("GET", urlStr, nil)
+		if errReq != nil {
+			err = errReq
+			return
+		}
+		req.Header.Set("User-Agent", userAgent)
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+		req.Header.Set("Referer", "https://kns.cnki.net/kns8s/defaultresult/index")
+
+		resp, err = c.session.Do(req)
+		if err != nil {
+			return
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		finalURL = resp.Request.URL.String()
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	blocked := strings.Contains(finalURL, "verify/home") || (resp != nil && resp.StatusCode == 403) ||
+		strings.Contains(string(body), "/verify/cnki.ico")
+
+	unlockedCaptchaMu.Lock()
+	knownCap, known := unlockedCaptcha[urlStr]
+	unlockedCaptchaMu.Unlock()
+	if known && knownCap != "" {
+		req2, _ := http.NewRequest("GET", urlStr+"&captchaId="+knownCap, nil)
+		req2.Header.Set("User-Agent", userAgent)
+		req2.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+		req2.Header.Set("Referer", "https://kns.cnki.net/kns8s/defaultresult/index")
+		if resp2, err2 := c.session.Do(req2); err2 == nil {
+			b2, _ := io.ReadAll(resp2.Body)
+			resp2.Body.Close()
+			f2 := resp2.Request.URL.String()
+			if resp2.StatusCode == 200 && !strings.Contains(f2, "verify/home") {
+				return string(b2), nil
+			}
+		}
+	}
+
+	for round := 0; blocked && round < 5; round++ {
+		if round > 0 {
+			req, _ := http.NewRequest("GET", urlStr, nil)
+			req.Header.Set("User-Agent", userAgent)
+			req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+			req.Header.Set("Referer", "https://kns.cnki.net/kns8s/defaultresult/index")
+			resp, err = c.session.Do(req)
+			if err != nil {
+				break
+			}
+			body, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			finalURL = resp.Request.URL.String()
+			if !strings.Contains(finalURL, "verify/home") {
+				blocked = false
+				break
+			}
+		}
+
+		captchaSource := finalURL
+		if !strings.Contains(captchaSource, "captchaType=") && resp != nil && resp.StatusCode == 403 {
+			var jsonResp struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			}
+			if jsonErr := json.Unmarshal(body, &jsonResp); jsonErr == nil && jsonResp.Code == -403 {
+				captchaSource = jsonResp.Message
+			} else {
+				captchaSource = string(body)
+			}
+		}
+
+		reType := regexp.MustCompile(`captchaType=([a-zA-Z]+)`)
+		reIdent := regexp.MustCompile(`ident=([a-zA-Z0-9]+)`)
+		reCap := regexp.MustCompile(`captchaId=([a-zA-Z0-9\-]+)`)
+		mType := reType.FindStringSubmatch(captchaSource)
+		mIdent := reIdent.FindStringSubmatch(captchaSource)
+		mCap := reCap.FindStringSubmatch(captchaSource)
+
+		solved := false
+		if len(mType) > 1 && len(mIdent) > 1 && len(mCap) > 1 {
+			captchaID := mCap[1]
+			if mType[1] == "clickWord" {
+				solved = solveClickWord(c.session, mIdent[1], captchaID, extractReturnURL(captchaSource))
+			} else if mType[1] == "blockPuzzle" {
+				solved = solveCaptcha(c.session, mIdent[1], captchaID)
+			}
+		}
+
+		if !solved {
+			continue
+		}
+
+		if len(mCap) > 1 {
+			unlockedCaptchaMu.Lock()
+			unlockedCaptcha[urlStr] = mCap[1]
+			unlockedCaptchaMu.Unlock()
+		}
+
+		req2, _ := http.NewRequest("GET", urlStr, nil)
+		req2.Header.Set("User-Agent", userAgent)
+		req2.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+		req2.Header.Set("Referer", "https://kns.cnki.net/kns8s/defaultresult/index")
+		resp2, err2 := c.session.Do(req2)
+		if err2 == nil {
+			b2, _ := io.ReadAll(resp2.Body)
+			resp2.Body.Close()
+			f2 := resp2.Request.URL.String()
+			if resp2.StatusCode == 200 && !strings.Contains(f2, "verify/home") {
+				body = b2
+				blocked = false
+				break
+			}
+		}
+	}
+
+	if blocked {
+		return "", fmt.Errorf("article page protected by captcha and automatic bypass was unsuccessful")
+	}
+
+	return string(body), nil
+}
+
+// ExtractDownloadLinks extracts PDF, CAJ, and other download URLs from CNKI abstract HTML.
+func ExtractDownloadLinks(htmlContent string) (pdfLink string, cajLink string, allLinks []string) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return "", "", nil
+	}
+
+	normalizeURL := func(raw string) string {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.HasPrefix(raw, "javascript:") {
+			return ""
+		}
+		if strings.HasPrefix(raw, "//") {
+			return "https:" + raw
+		}
+		if strings.HasPrefix(raw, "/") {
+			return "https://bar.cnki.net" + raw
+		}
+		return raw
+	}
+
+	doc.Find("a#pdfDown, a[name='pdfDown']").Each(func(_ int, s *goquery.Selection) {
+		if href, ok := s.Attr("href"); ok && pdfLink == "" {
+			pdfLink = normalizeURL(href)
+		}
+	})
+
+	doc.Find("a#cajDown, a[name='cajDown']").Each(func(_ int, s *goquery.Selection) {
+		if href, ok := s.Attr("href"); ok && cajLink == "" {
+			cajLink = normalizeURL(href)
+		}
+	})
+
+	doc.Find("a").Each(func(_ int, s *goquery.Selection) {
+		href, ok := s.Attr("href")
+		if !ok {
+			return
+		}
+		norm := normalizeURL(href)
+		if norm == "" {
+			return
+		}
+		text := strings.TrimSpace(s.Text())
+		id, _ := s.Attr("id")
+
+		if strings.Contains(norm, "bar/download/order") || strings.Contains(norm, "docdown.cnki.net") || strings.Contains(norm, "download") {
+			allLinks = append(allLinks, norm)
+			if pdfLink == "" && (strings.Contains(text, "PDF") || strings.Contains(strings.ToLower(id), "pdf")) {
+				pdfLink = norm
+			}
+			if cajLink == "" && (strings.Contains(text, "CAJ") || strings.Contains(strings.ToLower(id), "caj")) {
+				cajLink = norm
+			}
+		}
+	})
+
+	return pdfLink, cajLink, allLinks
+}
+
+// ParseContentDispositionFilename extracts and decodes the filename from Content-Disposition header.
+func ParseContentDispositionFilename(headerVal string) string {
+	if headerVal == "" {
+		return ""
+	}
+
+	// 1. Check RFC 5987 / UTF-8: filename*=utf-8''... or filename*=UTF-8''...
+	reUTF8 := regexp.MustCompile(`(?i)filename\*\s*=\s*(?:utf-8''|UTF-8'')([^;]+)`)
+	if m := reUTF8.FindStringSubmatch(headerVal); len(m) > 1 {
+		raw := strings.Trim(strings.TrimSpace(m[1]), `"'`)
+		if unescaped, err := url.QueryUnescape(raw); err == nil && unescaped != "" {
+			return sanitizeFilename(unescaped)
+		}
+		return sanitizeFilename(raw)
+	}
+
+	// 2. Check standard filename="..." or filename=...
+	reStd := regexp.MustCompile(`(?i)filename\s*=\s*("([^"]+)"|([^;]+))`)
+	if m := reStd.FindStringSubmatch(headerVal); len(m) > 1 {
+		raw := m[2]
+		if raw == "" {
+			raw = m[3]
+		}
+		raw = strings.Trim(strings.TrimSpace(raw), `"'`)
+		if unescaped, err := url.QueryUnescape(raw); err == nil && unescaped != "" {
+			return sanitizeFilename(unescaped)
+		}
+		return sanitizeFilename(raw)
+	}
+
+	return ""
+}
+
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(name)
+	name = regexp.MustCompile(`[\\/:*?"<>|\r\n\t]`).ReplaceAllString(name, "_")
+	name = strings.Trim(name, ". ")
+	return name
+}
+
+func (c *CnkiClient) buildDownloadCookieHeader() string {
+	cfg := LoadConfig()
+	cookieMap, _ := cfg["cnki_cookies"].(map[string]interface{})
+	if cookieMap == nil {
+		cookieMap = c.exportCookiesToMap()
+	}
+
+	lid, _ := cookieMap["LID"].(string)
+	clientID, _ := cookieMap["Ecp_ClientId"].(string)
+	sidKns, _ := cookieMap["SID_kns_new"].(string)
+	kns2, _ := cookieMap["KNS2COOKIE"].(string)
+
+	loginStuts, _ := cookieMap["Ecp_LoginStuts"].(string)
+	if loginStuts == "" {
+		loginStuts = `{"IsAutoLogin":false,"UserName":"sh0291","ShowName":"%E5%8D%97%E4%BA%AC%E6%9E%97%E4%B8%9A%E5%A4%A7%E5%AD%A6","UserType":"bk","BShowName":"","r":"vczXAG","Members":[]}`
+	}
+
+	notFirst, _ := cookieMap["Ecp_notFirstLogin"].(string)
+	if notFirst == "" {
+		notFirst = "vczXAG"
+	}
+
+	sessionVal, _ := cookieMap["Ecp_session"].(string)
+	if sessionVal == "" {
+		sessionVal = "1"
+	}
+
+	expireDate := time.Now().Add(30 * 24 * time.Hour).Format("2006-01-02 15:04:05")
+	linID := fmt.Sprintf("LinID=%s&ot=%s", lid, time.Now().Add(30*24*time.Hour).Format("02/01/2006 15:04:05"))
+
+	return fmt.Sprintf("LID=%s; Ecp_ClientId=%s; Ecp_LoginStuts=%s; Ecp_notFirstLogin=%s; Ecp_session=%s; c_m_LinID=%s; c_m_expire=%s; SID_kns_new=%s; KNS2COOKIE=%s",
+		lid, clientID, loginStuts, notFirst, sessionVal, linID, expireDate, sidKns, kns2)
+}
+
+// DownloadPaper downloads CNKI paper PDF (or CAJ) to the download sandbox folder.
+func (c *CnkiClient) DownloadPaper(targetURL, subfolder, defaultFilename string) (savedRelPath, savedAbsPath, actualFilename string, fileSize int64, err error) {
+	if err = c.ensureSession(); err != nil {
+		return "", "", "", 0, fmt.Errorf("ensure session failed: %w", err)
+	}
+
+	htmlContent, err := c.FetchDetailPageHTML(targetURL)
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("fetch detail page failed: %w", err)
+	}
+
+	pdfLink, cajLink, allLinks := ExtractDownloadLinks(htmlContent)
+	downloadURL := pdfLink
+	if downloadURL == "" {
+		downloadURL = cajLink
+	}
+	if downloadURL == "" && len(allLinks) > 0 {
+		downloadURL = allLinks[0]
+	}
+	if downloadURL == "" {
+		return "", "", "", 0, fmt.Errorf("未能从该文献详情页提取到下载链接（可能该文献无全文下载权限或非期刊文章）")
+	}
+
+	log.Printf("[CNKI Download] Selected download URL: %s\n", downloadURL)
+
+	relFolder, absFolder, err := EnsureSandboxFolder(subfolder)
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("create sandbox folder failed: %w", err)
+	}
+
+	rawCookies := c.buildDownloadCookieHeader()
+
+	downloadClient := &http.Client{
+		Transport: c.session.Transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			req.Header.Set("Cookie", rawCookies)
+			req.Header.Set("User-Agent", userAgent)
+			req.Header.Set("Referer", targetURL)
+			return nil
+		},
+	}
+
+	req, errReq := http.NewRequest("GET", downloadURL, nil)
+	if errReq != nil {
+		return "", "", "", 0, errReq
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Referer", targetURL)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+	req.Header.Set("Cookie", rawCookies)
+
+	resp, err := downloadClient.Do(req)
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("download request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", "", 0, fmt.Errorf("read response body failed: %w", err)
+	}
+
+	isHTML := strings.Contains(resp.Header.Get("Content-Type"), "text/html") ||
+		bytes.HasPrefix(bytes.TrimSpace(bodyBytes), []byte("<!DOCTYPE")) ||
+		bytes.HasPrefix(bytes.TrimSpace(bodyBytes), []byte("<html"))
+
+	if isHTML {
+		return "", "", "", 0, fmt.Errorf("下载未返回有效 PDF 文件流（知网返回了网页或未通过鉴权）")
+	}
+
+	if resp.StatusCode != 200 {
+		return "", "", "", 0, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
+
+	// Determine filename from Content-Disposition or fallback
+	cdHeader := resp.Header.Get("Content-Disposition")
+	parsedName := ParseContentDispositionFilename(cdHeader)
+	if parsedName != "" {
+		actualFilename = parsedName
+	} else if defaultFilename != "" {
+		actualFilename = sanitizeFilename(defaultFilename)
+		if !strings.HasSuffix(strings.ToLower(actualFilename), ".pdf") && !strings.HasSuffix(strings.ToLower(actualFilename), ".caj") {
+			actualFilename += ".pdf"
+		}
+	} else {
+		actualFilename = fmt.Sprintf("CNKI_Paper_%d.pdf", time.Now().Unix())
+	}
+
+	targetAbsPath := filepath.Join(absFolder, actualFilename)
+	if err := os.WriteFile(targetAbsPath, bodyBytes, 0644); err != nil {
+		return "", "", "", 0, fmt.Errorf("write destination file failed: %w", err)
+	}
+
+	fileSize = int64(len(bodyBytes))
+	targetRelPath := filepath.Join(relFolder, actualFilename)
+	log.Printf("[CNKI Download] Successfully downloaded %s (%s) to %s\n", actualFilename, FormatFileSize(fileSize), targetRelPath)
+
+	return targetRelPath, targetAbsPath, actualFilename, fileSize, nil
 }

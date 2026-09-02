@@ -46,3 +46,5 @@ id_rsa
 *_test.go
 test/
 tests/
+*.har
+*.exe~
