@@ -194,7 +194,9 @@ func main() {
 	logPath := ""
 	if logFile != nil {
 		logPath = logFile.Name()
-		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
+		// MultiWriter stops at the first write error. Write the file first so
+		// stderr becoming invalid after Windows FreeConsole cannot drop logs.
+		log.SetOutput(io.MultiWriter(logFile, os.Stderr))
 	}
 
 	isPiped := isStdinPiped()
@@ -221,6 +223,9 @@ func main() {
 		// silently in the background (Windows only; no-op elsewhere).
 		go func() {
 			time.Sleep(5 * time.Second)
+			if logFile != nil {
+				log.SetOutput(logFile)
+			}
 			detachConsole()
 		}()
 	} else {

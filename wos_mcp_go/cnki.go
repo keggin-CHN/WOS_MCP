@@ -349,6 +349,19 @@ func (c *CnkiClient) login(username string, password string) error {
 	resp.Body.Close()
 
 	finalURL := resp.Request.URL.String()
+	// CARSI's discovery service is a JavaScript page in a browser. A plain
+	// HTTP client does not execute that JavaScript, so select our institution
+	// explicitly and submit the SAML return request ourselves.
+	if strings.Contains(strings.ToLower(finalURL), "ds.carsi.edu.cn") {
+		log.Printf("CNKI CARSI discovery detected; selecting IdP %s\n", idpHost+"/idp/shibboleth")
+		resp, err = selectCnkiIdentityProvider(loginClient.client, finalURL, idpHost+"/idp/shibboleth")
+		if err != nil {
+			return fmt.Errorf("CNKI CARSI IdP selection failed: %w", err)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		finalURL = resp.Request.URL.String()
+	}
 	if !strings.Contains(finalURL, "uia.njfu.edu.cn") || !strings.Contains(finalURL, "login") {
 		return fmt.Errorf("CNKI SSO failed, URL: %s", finalURL)
 	}
@@ -482,6 +495,41 @@ func (c *CnkiClient) login(username string, password string) error {
 
 	log.Println("CNKI login successful!")
 	return nil
+}
+
+// selectCnkiIdentityProvider completes the CARSI discovery step that is
+// normally performed by the browser-side login JavaScript. The return URL and
+// RelayState are generated per request, so they must be taken from the DS URL
+// rather than reconstructed from constants.
+func selectCnkiIdentityProvider(client *http.Client, discoveryURL, entityID string) (*http.Response, error) {
+	dsURL, err := url.Parse(discoveryURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid discovery URL: %w", err)
+	}
+	returnURL := dsURL.Query().Get("return")
+	if returnURL == "" {
+		return nil, fmt.Errorf("discovery URL has no return parameter")
+	}
+	returnParsed, err := url.Parse(returnURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid discovery return URL: %w", err)
+	}
+
+	form := url.Values{}
+	form.Set("entityID", entityID)
+	form.Set("SAMLDS", "1")
+	if target := returnParsed.Query().Get("target"); target != "" {
+		form.Set("target", target)
+	}
+
+	req, err := http.NewRequest("POST", returnURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Referer", discoveryURL)
+	return client.Do(req)
 }
 
 // solveCaptcha solves CNKI slider captcha using image processing.
