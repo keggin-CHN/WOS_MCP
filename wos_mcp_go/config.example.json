@@ -2,7 +2,10 @@
     "username": "YOUR_USERNAME",
     "password": "YOUR_PASSWORD",
     "port": 5000,
+    "listen_public": false,
     "download_path": "download",
+    "local_pdf_roots": [],
+    "unpaywall_email": "",
     "wos_sid": "",
     "wos_cookies": {},
     "cnki_cookies": {}

@@ -17,13 +17,21 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.22'
+        go-version-file: wos_mcp_go/go.mod
+        cache-dependency-path: wos_mcp_go/go.sum
+
+    - name: Test Go Application
+      working-directory: wos_mcp_go
+      run: go test ./...
+
+    - name: Vet Go Application
+      working-directory: wos_mcp_go
+      run: go vet ./...
 
     - name: Build Go Application
       run: |
         mkdir dist
         cd wos_mcp_go
-        go mod tidy
         go build -o ..\dist\wos_mcp.exe
 
     - name: Prepare Release Folder

@@ -8,9 +8,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -28,197 +25,6 @@ var (
 	unlockedCaptchaMu sync.Mutex
 	unlockedCaptcha   = map[string]string{}
 )
-
-// 1. download_literature
-func downloadLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
-	}
-	doiOrWosId, _ := args["doi_or_wosid"].(string)
-	if doiOrWosId == "" {
-		if t, ok := args["title"].(string); ok && t != "" {
-			doiOrWosId = t
-		} else if q, ok := args["query"].(string); ok && q != "" {
-			doiOrWosId = q
-		} else if u, ok := args["url"].(string); ok && u != "" {
-			doiOrWosId = u
-		} else if d, ok := args["doi"].(string); ok && d != "" {
-			doiOrWosId = d
-		}
-	}
-	if strings.TrimSpace(doiOrWosId) == "" {
-		return mcp.NewToolResultText("参数错误: 请输入 DOI、WoS ID、知网文献 URL 或文献标题"), nil
-	}
-	doiOrWosId = strings.TrimSpace(doiOrWosId)
-
-	// Check if this is a CNKI URL or Chinese title query
-	if strings.Contains(doiOrWosId, "cnki.net") || strings.Contains(doiOrWosId, "kcms2") || regexp.MustCompile(`[\x{4e00}-\x{9fa5}]`).MatchString(doiOrWosId) {
-		log.Printf("[MCP] download_literature auto-routing to CNKI downloader: %s\n", doiOrWosId)
-		// Convert args for downloadCnkiPaperHandler
-		cnkiArgs := map[string]interface{}{}
-		if strings.HasPrefix(doiOrWosId, "http") {
-			cnkiArgs["url"] = doiOrWosId
-		} else {
-			cnkiArgs["title"] = doiOrWosId
-		}
-		if sub, ok := args["subfolder"].(string); ok {
-			cnkiArgs["subfolder"] = sub
-		}
-		request.Params.Arguments = cnkiArgs
-		return downloadCnkiPaperHandler(ctx, request)
-	}
-
-	doi := doiOrWosId
-	isDoi := strings.HasPrefix(doi, "10.")
-
-	if !isDoi {
-		log.Printf("[MCP] download_literature resolving WOS ID: %s\n", doiOrWosId)
-		sid, cookies, err := ensureWosSession()
-		if err != nil {
-			log.Printf("[MCP Error] download_literature ensureWosSession failed: %v\n", err)
-			return mcp.NewToolResultText(fmt.Sprintf("Error ensuring session: %v", err)), nil
-		}
-
-		url := fmt.Sprintf("https://www.webofscience.com/api/wosnx/core/runQuerySearch?SID=%s", sid)
-		payload := map[string]interface{}{
-			"product":     "WOSCC",
-			"searchMode":  "general",
-			"viewType":    "search",
-			"serviceMode": "summary",
-			"search": map[string]interface{}{
-				"mode":     "general",
-				"database": "WOSCC",
-				"query": []map[string]interface{}{
-					{"rowField": "UT", "rowText": doiOrWosId},
-				},
-			},
-			"retrieve": map[string]interface{}{
-				"first":    1,
-				"count":    1,
-				"history":  false,
-				"jcr":      true,
-				"sort":     "relevance",
-				"analyzes": []interface{}{},
-				"locale":   "en",
-			},
-		}
-
-		dataBytes, _ := json.Marshal(payload)
-		req, _ := http.NewRequest("POST", url, bytes.NewBuffer(dataBytes))
-		req.Header.Set("User-Agent", userAgent)
-		req.Header.Set("Origin", "https://www.webofscience.com")
-		req.Header.Set("Content-Type", "text/plain;charset=UTF-8")
-		req.Header.Set("Accept", "application/x-ndjson, application/json, text/plain, */*")
-		for k, v := range cookies {
-			req.AddCookie(&http.Cookie{Name: k, Value: v})
-		}
-
-		httpClient := &http.Client{Timeout: 15 * time.Second}
-		respWos, err := httpClient.Do(req)
-		if err != nil {
-			return mcp.NewToolResultText(fmt.Sprintf("WOS API Error: %v", err)), nil
-		}
-		defer respWos.Body.Close()
-		bodyBytes, _ := io.ReadAll(respWos.Body)
-
-		var parsedData []interface{}
-		json.Unmarshal(bodyBytes, &parsedData)
-		if len(parsedData) == 0 {
-			lines := strings.Split(string(bodyBytes), "\n")
-			for _, line := range lines {
-				if strings.TrimSpace(line) != "" {
-					var item interface{}
-					if json.Unmarshal([]byte(line), &item) == nil {
-						parsedData = append(parsedData, item)
-					}
-				}
-			}
-		}
-
-		foundDoi := ""
-		for _, item := range parsedData {
-			if dict, ok := item.(map[string]interface{}); ok {
-				if key, ok := dict["key"].(string); ok && key == "records" {
-					if payloadData, ok := dict["payload"].(map[string]interface{}); ok {
-						for _, recVal := range payloadData {
-							if rec, ok := recVal.(map[string]interface{}); ok {
-								if d, ok := rec["doi"].(string); ok {
-									foundDoi = d
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-
-		if foundDoi == "" {
-			msg := fmt.Sprintf("未能通过 WoS ID %s 查询到 DOI（可能不在核心合集或会话失效）。\n\n请提示用户：可手动访问 https://www.webofscience.com/wos/woscc/full-record/%s 查看。", doiOrWosId, doiOrWosId)
-			return mcp.NewToolResultText(msg), nil
-		}
-		doi = foundDoi
-	}
-
-	// Query Unpaywall API
-	unpaywallUrl := fmt.Sprintf("https://api.unpaywall.org/v2/%s?email=mcp-test@example.com", doi)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(unpaywallUrl)
-	if err != nil {
-		return mcp.NewToolResultText(fmt.Sprintf("Failed to query Unpaywall API: %v", err)), nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return mcp.NewToolResultText(fmt.Sprintf("API returned HTTP %d for DOI %s", resp.StatusCode, doi)), nil
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	var data map[string]interface{}
-	json.Unmarshal(body, &data)
-
-	isOa, _ := data["is_oa"].(bool)
-	oaLocations, _ := data["oa_locations"].([]interface{})
-	var bestUrl string
-
-	if isOa && len(oaLocations) > 0 {
-		for _, locVal := range oaLocations {
-			if loc, ok := locVal.(map[string]interface{}); ok {
-				if urlPdf, ok := loc["url_for_pdf"].(string); ok && urlPdf != "" {
-					bestUrl = urlPdf
-					break
-				} else if u, ok := loc["url"].(string); ok && u != "" && bestUrl == "" {
-					bestUrl = u
-				}
-			}
-		}
-	}
-
-	if bestUrl != "" {
-		// Attempt to download the PDF to sandbox folder
-		subfolder, _ := args["subfolder"].(string)
-		relFolder, absFolder, _ := EnsureSandboxFolder(subfolder)
-		safeDoiName := regexp.MustCompile(`[\\/:*?"<>|]`).ReplaceAllString(doi, "_") + ".pdf"
-		targetAbs := filepath.Join(absFolder, safeDoiName)
-		targetRel := filepath.Join(relFolder, safeDoiName)
-
-		reqPdf, _ := http.NewRequest("GET", bestUrl, nil)
-		reqPdf.Header.Set("User-Agent", userAgent)
-		respPdf, errPdf := client.Do(reqPdf)
-		if errPdf == nil && respPdf.StatusCode == 200 {
-			defer respPdf.Body.Close()
-			if f, errCreate := os.Create(targetAbs); errCreate == nil {
-				written, _ := io.Copy(f, respPdf.Body)
-				f.Close()
-				return mcp.NewToolResultText(fmt.Sprintf("### Open Access 文献下载成功！\n\n- **DOI**: `%s`\n- **保存文件**: `%s`\n- **文件大小**: `%s`\n- **本地绝对路径**: `%s`\n- **下载来源**: %s\n\n可调用 `read_paper_content` (参数 `file_path=\"%s\"`) 直接读取全文内容。", doi, targetRel, FormatFileSize(written), targetAbs, bestUrl, targetRel)), nil
-			}
-		}
-
-		return mcp.NewToolResultText(fmt.Sprintf("Success! Open Access PDF available for DOI: %s\n\nDownload Link: %s", doi, bestUrl)), nil
-	}
-
-	return mcp.NewToolResultText(fmt.Sprintf("Sorry, no Open Access version found for DOI: %s", doi)), nil
-}
 
 // 2. export_wos_papers
 func exportWosPapersHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -326,13 +132,11 @@ func getCnkiPaperDetailHandler(ctx context.Context, request mcp.CallToolRequest)
 	if !ok {
 		return mcp.NewToolResultError("invalid arguments"), nil
 	}
-	urlStr, ok := args["url"].(string)
-	if !ok || urlStr == "" {
-		return mcp.NewToolResultText("Error: url is required"), nil
-	}
-
-	// Also accept a title argument for direct title-based lookup
+	urlStr, _ := args["url"].(string)
 	titleArg, _ := args["title"].(string)
+	if strings.TrimSpace(urlStr) == "" && strings.TrimSpace(titleArg) == "" {
+		return mcp.NewToolResultError("请提供 url 或 title"), nil
+	}
 
 	client := NewCnkiClient()
 	if err := client.ensureSession(); err != nil {
@@ -406,7 +210,7 @@ func getCnkiPaperDetailHandler(ctx context.Context, request mcp.CallToolRequest)
 	}
 	out += fmt.Sprintf("**URL:** %s\n", urlStr)
 
-	return mcp.NewToolResultText(out), nil
+	return metadataResult(out, ToolCall{"download_cnki_paper", map[string]any{"url": urlStr, "title": title}}), nil
 }
 
 // searchAndReturnDetail searches by title and returns formatted article detail.
@@ -514,7 +318,7 @@ func searchAndReturnDetail(client *CnkiClient, title, originalURL string) (*mcp.
 	}
 	out += fmt.Sprintf("**URL:** %s\n", result.URL)
 
-	return mcp.NewToolResultText(out), nil
+	return metadataResult(out, ToolCall{"download_cnki_paper", map[string]any{"url": result.URL, "title": result.Title}}), nil
 }
 
 // searchCnkiHandler handles the search_cnki tool.
@@ -531,9 +335,9 @@ func searchCnkiHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 	if st, ok := args["search_type"].(string); ok && st != "" {
 		searchType = st
 	}
-	limit := 10
-	if l, ok := args["limit"].(float64); ok {
-		limit = int(l)
+	limit, err := integerArg(args, "limit", 10, 1, 100)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	client := NewCnkiClient()
@@ -547,6 +351,7 @@ func searchCnkiHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 	}
 
 	var out strings.Builder
+	next := make([]ToolCall, 0, len(results))
 	fmt.Fprintf(&out, "共找到 %d 条结果:\n\n", len(results))
 	for i, r := range results {
 		fmt.Fprintf(&out, "[%d] **%s**\n", i+1, r.Title)
@@ -559,8 +364,9 @@ func searchCnkiHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.C
 			fmt.Fprintf(&out, "    DOI: %s\n", r.DOI)
 		}
 		fmt.Fprintf(&out, "    URL: %s\n\n", r.URL)
+		next = append(next, ToolCall{"download_cnki_paper", map[string]any{"url": r.URL, "title": r.Title}})
 	}
-	return mcp.NewToolResultText(out.String()), nil
+	return metadataResult(out.String(), next...), nil
 }
 
 // 5. format_citation
@@ -598,14 +404,23 @@ func downloadCnkiPaperHandler(ctx context.Context, request mcp.CallToolRequest) 
 	title, _ := args["title"].(string)
 	query, _ := args["query"].(string)
 	subfolder, _ := args["subfolder"].(string)
-	extractText := true
-	if et, ok := args["extract_text"].(bool); ok {
-		extractText = et
+	extractText, maxChars, err := downloadReadOptions(args)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	if strings.TrimSpace(urlStr) == "" && strings.TrimSpace(title) == "" && strings.TrimSpace(query) == "" {
+		return mcp.NewToolResultError("请提供文献详情页 URL、文章标题(title)或检索词(query)"), nil
+	}
+	if urlStr != "" && !isCNKIURL(urlStr) {
+		return mcp.NewToolResultError("url 必须是知网 HTTP(S) 文献详情页；PDF 直链请使用 download_literature"), nil
+	}
+	if _, err := sanitizeSandboxPath(subfolder); err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	client := NewCnkiClient()
 	if err := client.ensureSession(); err != nil {
-		return mcp.NewToolResultText(fmt.Sprintf("知网会话初始化失败: %v", err)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("知网会话初始化失败: %v", err)), nil
 	}
 
 	searchKey := strings.TrimSpace(title)
@@ -631,10 +446,10 @@ func downloadCnkiPaperHandler(ctx context.Context, request mcp.CallToolRequest) 
 		}
 
 		if err != nil {
-			return mcp.NewToolResultText(fmt.Sprintf("知网检索失败: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("知网检索失败: %v", err)), nil
 		}
 		if len(results) == 0 {
-			return mcp.NewToolResultText(fmt.Sprintf("未在知网检索到与 %q 匹配的文献", searchKey)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("未在知网检索到与 %q 匹配的文献", searchKey)), nil
 		}
 
 		first := results[0]
@@ -647,41 +462,17 @@ func downloadCnkiPaperHandler(ctx context.Context, request mcp.CallToolRequest) 
 	}
 
 	// Download the paper
-	relPath, absPath, actualFilename, sizeBytes, err := client.DownloadPaper(urlStr, subfolder, paperTitle)
+	relPath, absPath, actualFilename, sizeBytes, err := client.DownloadPaper(ctx, urlStr, subfolder, paperTitle)
 	if err != nil {
 		log.Printf("[MCP Error] download_cnki_paper failed: %v\n", err)
-		return mcp.NewToolResultText(fmt.Sprintf("知网文献下载失败: %v\n\n文献 URL: %s", err, urlStr)), nil
+		return mcp.NewToolResultError(fmt.Sprintf("知网文献下载失败: %v\n\n文献 URL: %s", err, urlStr)), nil
 	}
 
-	var out strings.Builder
-	out.WriteString("### 知网文献 PDF 下载成功！\n\n")
-	if paperTitle != "" {
-		out.WriteString(fmt.Sprintf("- **文献标题**: %s\n", paperTitle))
-	}
-	if paperAuthors != "" {
-		out.WriteString(fmt.Sprintf("- **作者**: %s\n", paperAuthors))
-	}
-	if paperSource != "" {
-		out.WriteString(fmt.Sprintf("- **来源/期刊**: %s (%s)\n", paperSource, paperDate))
-	}
-	out.WriteString(fmt.Sprintf("- **保存文件**: `%s`\n", actualFilename))
-	out.WriteString(fmt.Sprintf("- **相对路径 (沙盒)**: `%s`\n", relPath))
-	out.WriteString(fmt.Sprintf("- **绝对路径**: `%s`\n", absPath))
-	out.WriteString(fmt.Sprintf("- **文件大小**: %s (%d bytes)\n", FormatFileSize(sizeBytes), sizeBytes))
-	out.WriteString(fmt.Sprintf("- **原始详情页**: %s\n\n", urlStr))
-
-	if extractText {
-		text, err := ExtractTextFromPDF(absPath, 3000)
-		if err == nil && len(strings.TrimSpace(text)) > 0 {
-			out.WriteString("### 文献正文/文本概览 (前 3000 字):\n```text\n")
-			out.WriteString(text)
-			out.WriteString("\n```\n\n")
-		}
-	}
-
-	out.WriteString(fmt.Sprintf("💡 提示：如需进一步研读全文，可直接调用 `read_paper_content` (参数 `file_path=\"%s\"`) 读取全文。", relPath))
-
-	return mcp.NewToolResultText(out.String()), nil
+	return downloadedPaperResult(ctx, DownloadedPaper{
+		FilePath: absPath, RelativePath: relPath, Filename: actualFilename,
+		SizeBytes: sizeBytes, SourceURL: urlStr, Title: paperTitle,
+		Authors: paperAuthors, Source: strings.TrimSpace(paperSource + " " + paperDate),
+	}, extractText, maxChars), nil
 }
 
 // listDownloadedPapersHandler lists files in the download sandbox.
@@ -718,37 +509,6 @@ func listDownloadedPapersHandler(ctx context.Context, request mcp.CallToolReques
 	}
 
 	out.WriteString("\n💡 可通过 `read_paper_content` 工具传入 `file_path` 直接读取对应文件内容。")
-	return mcp.NewToolResultText(out.String()), nil
-}
-
-// readPaperContentHandler reads content from a file inside download sandbox.
-func readPaperContentHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, ok := request.Params.Arguments.(map[string]interface{})
-	if !ok {
-		return mcp.NewToolResultError("invalid arguments"), nil
-	}
-	filePath, ok := args["file_path"].(string)
-	if !ok || strings.TrimSpace(filePath) == "" {
-		return mcp.NewToolResultText("参数错误: 请提供沙盒内文件相对路径 (file_path)"), nil
-	}
-	filePath = strings.TrimSpace(filePath)
-
-	maxChars := 20000
-	if mc, ok := args["max_chars"].(float64); ok && mc > 0 {
-		maxChars = int(mc)
-	}
-
-	content, err := ReadSandboxFile(filePath, maxChars)
-	if err != nil {
-		return mcp.NewToolResultText(fmt.Sprintf("读取文件失败: %v", err)), nil
-	}
-
-	var out strings.Builder
-	out.WriteString(fmt.Sprintf("### 文件内容: `%s`\n\n", filePath))
-	out.WriteString("```text\n")
-	out.WriteString(content)
-	out.WriteString("\n```")
-
 	return mcp.NewToolResultText(out.String()), nil
 }
 

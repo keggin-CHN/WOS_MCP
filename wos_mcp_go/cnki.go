@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/rand"
 	"encoding/base64"
@@ -1399,8 +1400,11 @@ func (c *CnkiClient) buildDownloadCookieHeader() string {
 		lid, clientID, loginStuts, notFirst, sessionVal, linID, expireDate, sidKns, kns2)
 }
 
-// DownloadPaper downloads CNKI paper PDF (or CAJ) to the download sandbox folder.
-func (c *CnkiClient) DownloadPaper(targetURL, subfolder, defaultFilename string) (savedRelPath, savedAbsPath, actualFilename string, fileSize int64, err error) {
+// DownloadPaper downloads a verified PDF to the download sandbox.
+func (c *CnkiClient) DownloadPaper(ctx context.Context, targetURL, subfolder, defaultFilename string) (savedRelPath, savedAbsPath, actualFilename string, fileSize int64, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", "", "", 0, err
+	}
 	if err = c.ensureSession(); err != nil {
 		return "", "", "", 0, fmt.Errorf("ensure session failed: %w", err)
 	}
@@ -1424,27 +1428,31 @@ func (c *CnkiClient) DownloadPaper(targetURL, subfolder, defaultFilename string)
 
 	log.Printf("[CNKI Download] Selected download URL: %s\n", downloadURL)
 
-	relFolder, absFolder, err := EnsureSandboxFolder(subfolder)
-	if err != nil {
-		return "", "", "", 0, fmt.Errorf("create sandbox folder failed: %w", err)
+	if !isCNKIURL(downloadURL) {
+		return "", "", "", 0, fmt.Errorf("unexpected CNKI download host")
 	}
 
 	rawCookies := c.buildDownloadCookieHeader()
 
 	downloadClient := &http.Client{
 		Transport: c.session.Transport,
+		Timeout:   90 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
-			req.Header.Set("Cookie", rawCookies)
+			if isCNKIURL(req.URL.String()) {
+				req.Header.Set("Cookie", rawCookies)
+			} else {
+				req.Header.Del("Cookie")
+			}
 			req.Header.Set("User-Agent", userAgent)
 			req.Header.Set("Referer", targetURL)
 			return nil
 		},
 	}
 
-	req, errReq := http.NewRequest("GET", downloadURL, nil)
+	req, errReq := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if errReq != nil {
 		return "", "", "", 0, errReq
 	}
@@ -1459,45 +1467,10 @@ func (c *CnkiClient) DownloadPaper(targetURL, subfolder, defaultFilename string)
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	paper, err := savePDFResponse(resp, subfolder, defaultFilename)
 	if err != nil {
-		return "", "", "", 0, fmt.Errorf("read response body failed: %w", err)
+		return "", "", "", 0, err
 	}
-
-	isHTML := strings.Contains(resp.Header.Get("Content-Type"), "text/html") ||
-		bytes.HasPrefix(bytes.TrimSpace(bodyBytes), []byte("<!DOCTYPE")) ||
-		bytes.HasPrefix(bytes.TrimSpace(bodyBytes), []byte("<html"))
-
-	if isHTML {
-		return "", "", "", 0, fmt.Errorf("下载未返回有效 PDF 文件流（知网返回了网页或未通过鉴权）")
-	}
-
-	if resp.StatusCode != 200 {
-		return "", "", "", 0, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
-	}
-
-	// Determine filename from Content-Disposition or fallback
-	cdHeader := resp.Header.Get("Content-Disposition")
-	parsedName := ParseContentDispositionFilename(cdHeader)
-	if parsedName != "" {
-		actualFilename = parsedName
-	} else if defaultFilename != "" {
-		actualFilename = sanitizeFilename(defaultFilename)
-		if !strings.HasSuffix(strings.ToLower(actualFilename), ".pdf") && !strings.HasSuffix(strings.ToLower(actualFilename), ".caj") {
-			actualFilename += ".pdf"
-		}
-	} else {
-		actualFilename = fmt.Sprintf("CNKI_Paper_%d.pdf", time.Now().Unix())
-	}
-
-	targetAbsPath := filepath.Join(absFolder, actualFilename)
-	if err := os.WriteFile(targetAbsPath, bodyBytes, 0644); err != nil {
-		return "", "", "", 0, fmt.Errorf("write destination file failed: %w", err)
-	}
-
-	fileSize = int64(len(bodyBytes))
-	targetRelPath := filepath.Join(relFolder, actualFilename)
-	log.Printf("[CNKI Download] Successfully downloaded %s (%s) to %s\n", actualFilename, FormatFileSize(fileSize), targetRelPath)
-
-	return targetRelPath, targetAbsPath, actualFilename, fileSize, nil
+	log.Printf("[CNKI Download] Saved PDF %s (%s)\n", paper.RelativePath, FormatFileSize(paper.SizeBytes))
+	return paper.RelativePath, paper.FilePath, paper.Filename, paper.SizeBytes, nil
 }

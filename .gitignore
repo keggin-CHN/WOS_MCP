@@ -28,6 +28,5 @@ downloads/
 
 # Local presentation & test files
 *.pptx
-*_test.go
 test/
 tests/

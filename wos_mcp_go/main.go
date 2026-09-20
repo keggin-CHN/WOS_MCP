@@ -71,30 +71,39 @@ func backgroundMaintainer() {
 func setupServer() *server.MCPServer {
 	s := server.NewMCPServer(
 		"Academic_WoS_CNKI",
-		"1.0.0",
+		"1.1.0",
 		server.WithToolCapabilities(true),
+		server.WithInstructions(academicReadingInstructions),
 	)
 
 	s.AddTool(mcp.NewTool("search_literature",
-		mcp.WithDescription("Search for literature on Web of Science."),
+		mcp.WithDescription("检索 Web of Science 文献，返回题录/摘要，不是全文。研究、综述或分析任务应筛选相关文献后主动调用 download_literature，再按 next_call 连续阅读全文。"),
 		mcp.WithString("query", mcp.Required(), mcp.Description("The search query string")),
 		mcp.WithNumber("limit", mcp.Description("Number of results to return (default 10)")),
 	), searchLiteratureHandler)
 
 	s.AddTool(mcp.NewTool("get_wos_paper_details",
-		mcp.WithDescription("Fetch full detailed metadata for a specific paper"),
+		mcp.WithDescription("获取 WoS 题录和摘要元数据，不含论文全文。需要分析方法、结果或局限时继续调用 download_literature。"),
 		mcp.WithString("wos_id", mcp.Required(), mcp.Description("The Web of Science ID (e.g., WOS:000295471900004)")),
 	), getWosPaperDetailsHandler)
 
 	s.AddTool(mcp.NewTool("search_cnki",
-		mcp.WithDescription("Search for Chinese literature on CNKI."),
+		mcp.WithDescription("检索知网文献，返回题录/摘要，不是全文。研究、综述或分析任务应筛选相关论文后主动调用 download_cnki_paper，再按 next_call 连续阅读全文。"),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
+		mcp.WithString("search_type", mcp.Description("搜索类型：主题/篇名/作者/关键词，默认主题")),
 		mcp.WithNumber("limit", mcp.Description("Number of results to return")),
 	), searchCnkiHandler)
 
 	s.AddTool(mcp.NewTool("download_literature",
-		mcp.WithDescription("Download literature via Unpaywall OA links."),
-		mcp.WithString("doi_or_wosid", mcp.Required(), mcp.Description("DOI or WOS ID")),
+		mcp.WithDescription("获取并开始阅读文献全文：按 DOI/WoS ID 查找开放 PDF，按知网 URL/标题下载知网 PDF，或下载直链 PDF。默认立即返回带页码的正文分段；有 next_call 时继续读取直到 has_more=false。至少提供一种文献标识。"),
+		mcp.WithString("doi_or_wosid", mcp.Description("DOI、doi.org URL 或 WOS: 开头的 ID")),
+		mcp.WithString("doi", mcp.Description("DOI（doi_or_wosid 的别名）")),
+		mcp.WithString("url", mcp.Description("知网详情页 URL 或 HTTP(S) PDF 直链")),
+		mcp.WithString("title", mcp.Description("知网文献标题；提供 DOI/URL 时仅作为保存文件名")),
+		mcp.WithString("query", mcp.Description("知网检索词，未提供其他标识时使用")),
+		mcp.WithString("subfolder", mcp.Description("download 下的子目录，支持多级目录")),
+		mcp.WithBoolean("extract_text", mcp.DefaultBool(true), mcp.Description("下载后立即阅读正文，默认 true；仅保存文件时才设 false")),
+		mcp.WithInteger("max_chars", mcp.DefaultNumber(defaultReadChars), mcp.Min(1), mcp.Max(maxReadChars), mcp.Description("本次正文字符数上限，默认 20000；超出后返回精确续读参数")),
 	), downloadLiteratureHandler)
 
 	s.AddTool(mcp.NewTool("export_wos_papers",
@@ -107,25 +116,26 @@ func setupServer() *server.MCPServer {
 	), exportWosPapersHandler)
 
 	s.AddTool(mcp.NewTool("get_cnki_paper_detail",
-		mcp.WithDescription("获取知网论文详情（摘要、作者、关键词等），自动绕过验证码限制"),
-		mcp.WithString("url", mcp.Required(), mcp.Description("CNKI paper URL")),
+		mcp.WithDescription("获取知网论文题录和摘要，不含全文。url/title 至少一个；研读任务应继续调用 download_cnki_paper 获取正文。"),
+		mcp.WithString("url", mcp.Description("CNKI paper URL")),
 		mcp.WithString("title", mcp.Description("（可选）文章标题，提供时直接通过搜索获取详情，更可靠")),
 	), getCnkiPaperDetailHandler)
 
 	s.AddTool(mcp.NewTool("find_best_match",
-		mcp.WithDescription("在知网搜索并返回最匹配结果"),
+		mcp.WithDescription("在知网搜索并返回候选题录/摘要，不是全文。选定文章后调用 download_cnki_paper 下载并阅读。"),
 		mcp.WithString("query", mcp.Required(), mcp.Description("Search query")),
 		mcp.WithString("search_type", mcp.Description("搜索类型（主题/篇名/作者/关键词）")),
 		mcp.WithNumber("limit", mcp.Description("结果数量 (default 5)")),
 	), searchCnkiHandler)
 
 	s.AddTool(mcp.NewTool("download_cnki_paper",
-		mcp.WithDescription("下载中国知网 (CNKI) 文献 PDF 全文至本地 download 沙盒目录，并可提取正文前 3000 字文本"),
+		mcp.WithDescription("下载知网 PDF 并立即开始阅读全文，默认返回带页码的正文分段和阅读进度。研究或综述时优先用于选定的论文；按 next_call 继续读取，不能把第一段当作全文。"),
 		mcp.WithString("url", mcp.Description("知网文献详情页 URL (如 https://kns.cnki.net/kcms2/article/abstract?v=...)")),
 		mcp.WithString("title", mcp.Description("文章标题（若未提供 URL，将自动按标题精确搜索并下载）")),
 		mcp.WithString("query", mcp.Description("检索关键词（若未提供 URL/标题，将自动搜索第 1 篇匹配文献并下载）")),
 		mcp.WithString("subfolder", mcp.Description("存放子文件夹名称（可选，如不填则存入当天日期目录或默认目录）")),
-		mcp.WithBoolean("extract_text", mcp.Description("是否同时提取并返回 PDF 前 3000 字纯文本供直接研读（默认 true）")),
+		mcp.WithBoolean("extract_text", mcp.DefaultBool(true), mcp.Description("默认 true：下载后立即返回正文；仅存档时设 false")),
+		mcp.WithInteger("max_chars", mcp.DefaultNumber(defaultReadChars), mcp.Min(1), mcp.Max(maxReadChars), mcp.Description("每次正文字符数上限，默认 20000；超出部分通过 next_call 续读")),
 	), downloadCnkiPaperHandler)
 
 	s.AddTool(mcp.NewTool("list_downloaded_papers",
@@ -133,11 +143,8 @@ func setupServer() *server.MCPServer {
 		mcp.WithString("subfolder", mcp.Description("子文件夹路径（可选，留空查看整个 download 目录）")),
 	), listDownloadedPapersHandler)
 
-	s.AddTool(mcp.NewTool("read_paper_content",
-		mcp.WithDescription("读取 download 沙盒目录下指定文献文件的文本内容（支持 PDF 纯文本流提取及 txt/json 读取）"),
-		mcp.WithString("file_path", mcp.Required(), mcp.Description("文件在 download 目录下的相对路径 (如 2026-09-02/paper.pdf)")),
-		mcp.WithNumber("max_chars", mcp.Description("最大读取字符数（默认 20000）")),
-	), readPaperContentHandler)
+	s.AddTool(paperReadingTool("read_paper_content", "读取指定位置的 PDF 全文，支持本机绝对路径、file:// URI、download 相对路径；也可读取沙盒内 TXT/JSON/Markdown。返回页码、覆盖范围及 next_call；持续续读直到 has_more=false，并报告未提取的页面。"), readPaperContentHandler)
+	s.AddTool(paperReadingTool("read_pdf", "直接读取用户指定本地路径的 PDF，无需先下载或移入 download。支持 Windows/Linux/macOS 绝对路径和 file:// URI，可按页选择或按字符连续阅读全文。路径属于 MCP 服务器所在机器。"), readPDFHandler)
 
 	s.AddTool(mcp.NewTool("format_citation",
 		mcp.WithDescription("Format citation string"),
@@ -195,8 +202,8 @@ func main() {
 	if !isPiped {
 		// Interactive / Double-click execution: display banner
 		fmt.Printf("============================================================\n")
-		fmt.Printf(" WOS & CNKI MCP Server  v1.0.0\n")
-		fmt.Printf(" 功能: Web of Science 检索 / CNKI 检索·免验证摘要\n")
+		fmt.Printf(" WOS & CNKI MCP Server  v1.1.0\n")
+		fmt.Printf(" 功能: WoS / CNKI 检索·全文下载·本地 PDF 分页阅读\n")
 		fmt.Printf(" 后台维护: 每 2 小时自动校验并刷新 WOS / CNKI 登录 Cookie\n")
 		fmt.Printf(" ------------------------------------------------------------\n")
 		fmt.Printf(" SSE 端点 : http://%s/sse\n", addr)
@@ -335,7 +342,7 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 	}
 
 	data, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://www.webofscience.com")
 	req.Header.Set("Referer", "https://www.webofscience.com/wos/alldb/smart-search")
@@ -388,6 +395,7 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 	out := fmt.Sprintf("Found **%d** results in WoS.\n\n| # | Title | Authors | Source | Year | DOI | WoS ID |\n|---|-------|---------|--------|------|-----|--------|\n", totalResults)
 
 	i := 1
+	var next []ToolCall
 	for _, recI := range recordsData {
 		rec, ok := recI.(map[string]interface{})
 		if !ok {
@@ -443,10 +451,17 @@ func searchLiteratureHandler(ctx context.Context, request mcp.CallToolRequest) (
 		wosId, _ := rec["colluid"].(string)
 
 		out += fmt.Sprintf("| %d | %s | %s | %s | %s | %s | %s |\n", i, title, authors, source, year, doi, wosId)
+		identifier := doi
+		if identifier == "" {
+			identifier = wosId
+		}
+		if identifier != "" {
+			next = append(next, ToolCall{"download_literature", map[string]any{"doi_or_wosid": identifier}})
+		}
 		i++
 	}
 
-	return mcp.NewToolResultText(out), nil
+	return metadataResult(out, next...), nil
 }
 
 func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -492,7 +507,7 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	data, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", url, bytes.NewBuffer(data))
+	req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(data))
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Origin", "https://www.webofscience.com")
 	req.Header.Set("Referer", "https://www.webofscience.com/wos/woscc/summary")
@@ -526,5 +541,5 @@ func getWosPaperDetailsHandler(ctx context.Context, request mcp.CallToolRequest)
 	}
 
 	resJson, _ := json.MarshalIndent(recordsData, "", "  ")
-	return mcp.NewToolResultText(string(resJson)), nil
+	return metadataResult(string(resJson), ToolCall{"download_literature", map[string]any{"doi_or_wosid": wosId}}), nil
 }

@@ -2,292 +2,294 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/ledongthuc/pdf"
 )
 
-// SandboxFileInfo contains file metadata inside download sandbox.
-type SandboxFileInfo struct {
-	Name         string    `json:"name"`
-	RelativePath string    `json:"relative_path"`
-	Size         int64     `json:"size_bytes"`
-	SizeHuman    string    `json:"size_human"`
-	ModTime      time.Time `json:"mod_time"`
-	IsDir        bool      `json:"is_dir"`
+const (
+	defaultReadChars = 20000
+	maxReadChars     = 100000
+	maxPDFPages      = 2000
+	maxPDFTextBytes  = 32 << 20
+)
+
+type ReadOptions struct {
+	StartPage int
+	EndPage   int
+	Offset    int
+	MaxChars  int
 }
 
-// FormatFileSize formats byte count to human-readable string.
-func FormatFileSize(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+type ToolCall struct {
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
 }
 
-// sanitizeSandboxPath validates that a relative path stays inside downloadDir.
-func sanitizeSandboxPath(relPath string) (string, error) {
-	cleanRel := filepath.Clean(relPath)
-	if strings.HasPrefix(cleanRel, "..") || filepath.IsAbs(cleanRel) {
-		// Clean leading slashes
-		cleanRel = strings.TrimLeft(cleanRel, "\\/.")
-	}
-	absTarget := filepath.Join(downloadDir, cleanRel)
-	absTarget = filepath.Clean(absTarget)
+type PaperPage struct {
+	PageNumber int    `json:"page_number"`
+	StartChar  int    `json:"start_char"`
+	EndChar    int    `json:"end_char"`
+	TotalChars int    `json:"total_chars"`
+	Text       string `json:"text"`
+}
 
-	absRoot, err := filepath.Abs(downloadDir)
+type PaperContent struct {
+	FilePath            string      `json:"file_path"`
+	Format              string      `json:"format"`
+	ContentLevel        string      `json:"content_level"`
+	ExtractionMethod    string      `json:"extraction_method"`
+	TotalPages          int         `json:"total_pages,omitempty"`
+	StartPage           int         `json:"start_page,omitempty"`
+	EndPage             int         `json:"end_page,omitempty"`
+	Offset              int         `json:"offset"`
+	NextOffset          int         `json:"next_offset"`
+	TotalChars          int         `json:"total_chars"`
+	ReturnedChars       int         `json:"returned_chars"`
+	HasMore             bool        `json:"has_more"`
+	RangeCoversDocument bool        `json:"range_covers_document"`
+	FullTextIncluded    bool        `json:"full_text_included"`
+	ExtractionComplete  bool        `json:"extraction_complete"`
+	Pages               []PaperPage `json:"pages,omitempty"`
+	Content             string      `json:"content,omitempty"`
+	PagesWithoutText    []int       `json:"pages_without_text,omitempty"`
+	Warnings            []string    `json:"warnings,omitempty"`
+	NextCall            *ToolCall   `json:"next_call,omitempty"`
+	ReadingNote         string      `json:"reading_note"`
+}
+
+type pdfDocument struct {
+	pages    []string
+	warnings []string
+	bytes    int
+}
+
+type pdfCacheEntry struct {
+	info os.FileInfo
+	doc  *pdfDocument
+	used time.Time
+}
+
+// Cache immutable text across continuation calls. Mutable PDF parser objects
+// are never shared. Both the number of documents and total bytes are bounded.
+var pdfTextCache = struct {
+	sync.Mutex
+	entries map[string]pdfCacheEntry
+}{entries: make(map[string]pdfCacheEntry)}
+
+func loadPDF(ctx context.Context, path string, info os.FileInfo) (doc *pdfDocument, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pdfTextCache.Lock()
+	if entry, ok := pdfTextCache.entries[path]; ok && os.SameFile(entry.info, info) && entry.info.Size() == info.Size() && entry.info.ModTime().Equal(info.ModTime()) {
+		entry.used = time.Now()
+		pdfTextCache.entries[path] = entry
+		pdfTextCache.Unlock()
+		return entry.doc, nil
+	}
+	pdfTextCache.Unlock()
+	defer func() {
+		if p := recover(); p != nil {
+			doc, err = nil, fmt.Errorf("PDF parser failed: %v; try an unencrypted PDF with a searchable text layer", p)
+		}
+	}()
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	header := make([]byte, 1024)
+	n, readErr := f.ReadAt(header, 0)
+	if readErr != nil && readErr != io.EOF {
+		return nil, readErr
+	}
+	if !bytes.Contains(header[:n], []byte("%PDF-")) {
+		return nil, fmt.Errorf("file is not a PDF (it may be an HTML login page or CAJ file)")
+	}
+	r, err := pdf.NewReader(f, info.Size())
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse PDF (damaged or password-protected): %w", err)
+	}
+	count := r.NumPage()
+	if count < 1 || count > maxPDFPages {
+		return nil, fmt.Errorf("PDF page count %d is outside the supported range 1-%d; split the document", count, maxPDFPages)
+	}
+	doc = &pdfDocument{pages: make([]string, count)}
+	for i := 1; i <= count; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		text, pageErr := extractPDFPage(r, i)
+		if pageErr != nil {
+			doc.warnings = append(doc.warnings, fmt.Sprintf("第 %d 页提取失败: %v", i, pageErr))
+			continue
+		}
+		doc.pages[i-1] = text
+		doc.bytes += len(text)
+		if doc.bytes > maxPDFTextBytes {
+			return nil, fmt.Errorf("extracted text exceeds %s; split the PDF", FormatFileSize(maxPDFTextBytes))
+		}
+	}
+	pdfTextCache.Lock()
+	defer pdfTextCache.Unlock()
+	delete(pdfTextCache.entries, path)
+	for {
+		total := doc.bytes
+		oldest := ""
+		var oldestTime time.Time
+		for key, entry := range pdfTextCache.entries {
+			total += entry.doc.bytes
+			if oldest == "" || entry.used.Before(oldestTime) {
+				oldest, oldestTime = key, entry.used
+			}
+		}
+		if len(pdfTextCache.entries) < 4 && total <= maxPDFTextBytes {
+			break
+		}
+		delete(pdfTextCache.entries, oldest)
+	}
+	pdfTextCache.entries[path] = pdfCacheEntry{info: info, doc: doc, used: time.Now()}
+	return doc, nil
+}
+
+func extractPDFPage(r *pdf.Reader, number int) (text string, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			text, err = "", fmt.Errorf("page parser failed: %v", p)
+		}
+	}()
+	// Font names (e.g. F1) are page-local. Reusing a name-based font cache across
+	// pages can silently decode later pages using the wrong Unicode mapping.
+	text, err = r.Page(number).GetPlainText(nil)
 	if err != nil {
 		return "", err
 	}
-	absTargetClean, err := filepath.Abs(absTarget)
-	if err != nil {
-		return "", err
-	}
-
-	if !strings.HasPrefix(absTargetClean, absRoot) {
-		return "", fmt.Errorf("access denied: path escapes download sandbox")
-	}
-	return absTargetClean, nil
+	return strings.TrimSpace(strings.ReplaceAll(strings.ToValidUTF8(text, "�"), "\x00", "")), nil
 }
 
-// EnsureSandboxFolder creates and returns an isolated directory inside download sandbox.
-func EnsureSandboxFolder(subfolder string) (string, string, error) {
-	if subfolder == "" {
-		subfolder = time.Now().Format("2006-01-02")
+func ReadPaper(ctx context.Context, filePath string, opts ReadOptions) (*PaperContent, error) {
+	if opts.StartPage == 0 {
+		opts.StartPage = 1
 	}
-	// Sanitize subfolder name
-	subfolder = regexp.MustCompile(`[\\/:*?"<>|]`).ReplaceAllString(subfolder, "_")
-	subfolder = strings.TrimSpace(subfolder)
-
-	absPath, err := sanitizeSandboxPath(subfolder)
+	if opts.MaxChars == 0 {
+		opts.MaxChars = defaultReadChars
+	}
+	if opts.StartPage < 1 || opts.EndPage < 0 || opts.Offset < 0 || opts.MaxChars < 1 || opts.MaxChars > maxReadChars {
+		return nil, fmt.Errorf("invalid read options: start_page >= 1, end_page >= 1 when set, offset >= 0, max_chars 1-%d", maxReadChars)
+	}
+	path, err := resolvePaperPath(filePath)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
-
-	if err := os.MkdirAll(absPath, 0755); err != nil {
-		return "", "", fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	relPath, err := filepath.Rel(downloadDir, absPath)
+	info, err := os.Stat(path)
 	if err != nil {
-		relPath = subfolder
+		return nil, err
 	}
-	return relPath, absPath, nil
-}
-
-// ListSandboxFiles lists all files and directories in download sandbox or subfolder.
-func ListSandboxFiles(subfolder string) ([]SandboxFileInfo, error) {
-	targetDir := downloadDir
-	if subfolder != "" {
-		p, err := sanitizeSandboxPath(subfolder)
+	if !info.Mode().IsRegular() || info.Size() > maxPaperBytes {
+		return nil, fmt.Errorf("expected a regular file no larger than %s", FormatFileSize(maxPaperBytes))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	result := &PaperContent{FilePath: path, Format: strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), "."), Offset: opts.Offset, ExtractionComplete: true}
+	var texts []string
+	if result.Format == "pdf" {
+		doc, err := loadPDF(ctx, path, info)
 		if err != nil {
 			return nil, err
 		}
-		targetDir = p
-	}
-
-	if _, err := os.Stat(targetDir); os.IsNotExist(err) {
-		return []SandboxFileInfo{}, nil
-	}
-
-	var results []SandboxFileInfo
-	err := filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
+		result.ExtractionMethod = "ledongthuc/pdf"
+		result.TotalPages = len(doc.pages)
+		if opts.EndPage == 0 {
+			opts.EndPage = result.TotalPages
+		}
+		if opts.StartPage > opts.EndPage || opts.EndPage > result.TotalPages {
+			return nil, fmt.Errorf("invalid page range %d-%d; PDF has %d pages", opts.StartPage, opts.EndPage, result.TotalPages)
+		}
+		result.StartPage, result.EndPage = opts.StartPage, opts.EndPage
+		result.RangeCoversDocument = opts.StartPage == 1 && opts.EndPage == result.TotalPages
+		result.Warnings = append(result.Warnings, doc.warnings...)
+		result.Warnings = append(result.Warnings, "仅提取 PDF 文本层；图片、图表和公式的视觉内容未被读取，多栏版式可能影响文本顺序。")
+		texts = doc.pages[opts.StartPage-1 : opts.EndPage]
+		for i, text := range doc.pages {
+			if strings.TrimSpace(text) == "" {
+				result.PagesWithoutText = append(result.PagesWithoutText, i+1)
+			}
+		}
+		if len(result.PagesWithoutText) > 0 {
+			result.ExtractionComplete = false
+			result.Warnings = append(result.Warnings, "存在无可提取文本的页面，可能是扫描页、纯图页、空白页或字体解码失败；需要 OCR 或视觉阅读，不能声称全文已读。")
+		}
+	} else {
+		if result.Format != "txt" && result.Format != "json" && result.Format != "md" {
+			return nil, fmt.Errorf("unsupported format .%s; use PDF, TXT, JSON or Markdown (convert CAJ to PDF first)", result.Format)
+		}
+		if opts.StartPage != 1 || opts.EndPage != 0 {
+			return nil, fmt.Errorf("start_page/end_page apply only to PDFs; use offset for text files")
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			return nil, err
 		}
-		if path == targetDir {
-			return nil
+		if !utf8.Valid(data) {
+			return nil, fmt.Errorf("text file must be UTF-8 encoded")
 		}
-		rel, err := filepath.Rel(downloadDir, path)
-		if err != nil {
-			rel = filepath.Base(path)
-		}
-		results = append(results, SandboxFileInfo{
-			Name:         info.Name(),
-			RelativePath: rel,
-			Size:         info.Size(),
-			SizeHuman:    FormatFileSize(info.Size()),
-			ModTime:      info.ModTime(),
-			IsDir:        info.IsDir(),
-		})
-		return nil
-	})
-
-	return results, err
-}
-
-// ReadSandboxFile reads text content from a file in the download sandbox.
-// If it's a PDF, attempts text extraction; otherwise reads as UTF-8 text.
-func ReadSandboxFile(relPath string, maxChars int) (string, error) {
-	absPath, err := sanitizeSandboxPath(relPath)
-	if err != nil {
-		return "", err
+		texts = []string{string(data)}
+		result.ExtractionMethod, result.RangeCoversDocument = "utf-8", true
 	}
-
-	info, err := os.Stat(absPath)
-	if err != nil {
-		return "", err
+	for _, text := range texts {
+		result.TotalChars += utf8.RuneCountInString(text)
 	}
-	if info.IsDir() {
-		return "", fmt.Errorf("%s is a directory", relPath)
+	if opts.Offset > result.TotalChars {
+		return nil, fmt.Errorf("offset %d exceeds selected text length %d", opts.Offset, result.TotalChars)
 	}
-
-	if maxChars <= 0 {
-		maxChars = 20000
-	}
-
-	ext := strings.ToLower(filepath.Ext(absPath))
-	if ext == ".pdf" {
-		return ExtractTextFromPDF(absPath, maxChars)
-	}
-
-	data, err := os.ReadFile(absPath)
-	if err != nil {
-		return "", err
-	}
-
-	text := string(data)
-	runes := []rune(text)
-	if len(runes) > maxChars {
-		return string(runes[:maxChars]) + fmt.Sprintf("\n\n...[已截断，共 %d 字符，显示前 %d 字符]", len(runes), maxChars), nil
-	}
-	return text, nil
-}
-
-// ExtractTextFromPDF extracts readable text from PDF streams.
-func ExtractTextFromPDF(pdfPath string, maxChars int) (string, error) {
-	data, err := os.ReadFile(pdfPath)
-	if err != nil {
-		return "", err
-	}
-
-	var out strings.Builder
-	streamRe := regexp.MustCompile(`(?s)stream\r?\n(.*?)\r?\nendstream`)
-	matches := streamRe.FindAllSubmatch(data, -1)
-
-	textTokenRe := regexp.MustCompile(`\((.*?)\)\s*Tj|\[(.*?)\]\s*TJ`)
-
-	for _, m := range matches {
-		if len(m) < 2 {
+	remaining, skip := opts.MaxChars, opts.Offset
+	for i, text := range texts {
+		length := utf8.RuneCountInString(text)
+		if skip >= length {
+			skip -= length
 			continue
 		}
-		rawStream := m[1]
-		decompressed := decompressFlate(rawStream)
-		streamToSearch := rawStream
-		if len(decompressed) > 0 {
-			streamToSearch = decompressed
-		}
-
-		subMatches := textTokenRe.FindAllSubmatch(streamToSearch, -1)
-		for _, sm := range subMatches {
-			if len(sm) > 1 && len(sm[1]) > 0 {
-				clean := cleanPDFString(string(sm[1]))
-				if len(strings.TrimSpace(clean)) > 0 {
-					out.WriteString(clean)
-					out.WriteString(" ")
-				}
-			} else if len(sm) > 2 && len(sm[2]) > 0 {
-				clean := extractTJArray(string(sm[2]))
-				if len(strings.TrimSpace(clean)) > 0 {
-					out.WriteString(clean)
-					out.WriteString(" ")
-				}
-			}
-		}
-
-		if out.Len() >= maxChars*2 {
+		if remaining == 0 {
 			break
 		}
-	}
-
-	res := strings.TrimSpace(out.String())
-	if len(res) == 0 {
-		// Fallback: search for direct plain strings in PDF
-		res = extractVisibleStrings(data, maxChars)
-	}
-
-	runes := []rune(res)
-	if len(runes) > maxChars {
-		return string(runes[:maxChars]) + fmt.Sprintf("\n\n...[PDF 文本已截断，共 %d 字符，显示前 %d 字符]", len(runes), maxChars), nil
-	}
-	if len(runes) == 0 {
-		return fmt.Sprintf("PDF 文件大小: %s，未能直接提取出纯文本流（可能为扫描件图像或使用专用 CID 字体编码）。", FormatFileSize(int64(len(data)))), nil
-	}
-	return res, nil
-}
-
-func decompressFlate(data []byte) []byte {
-	r, err := zlib.NewReader(bytes.NewReader(data))
-	if err != nil {
-		return nil
-	}
-	defer r.Close()
-	decompressed, err := io.ReadAll(r)
-	if err != nil {
-		return nil
-	}
-	return decompressed
-}
-
-func cleanPDFString(s string) string {
-	s = strings.ReplaceAll(s, `\n`, "\n")
-	s = strings.ReplaceAll(s, `\r`, "\r")
-	s = strings.ReplaceAll(s, `\t`, "\t")
-	s = strings.ReplaceAll(s, `\(`, "(")
-	s = strings.ReplaceAll(s, `\)`, ")")
-	s = strings.ReplaceAll(s, `\\`, `\`)
-	return s
-}
-
-func extractTJArray(tj string) string {
-	var b strings.Builder
-	inParen := false
-	var cur strings.Builder
-	for i := 0; i < len(tj); i++ {
-		ch := tj[i]
-		if ch == '(' && !inParen {
-			inParen = true
-			cur.Reset()
-		} else if ch == ')' && inParen {
-			inParen = false
-			b.WriteString(cleanPDFString(cur.String()))
-		} else if inParen {
-			cur.WriteByte(ch)
-		}
-	}
-	return b.String()
-}
-
-func extractVisibleStrings(data []byte, maxChars int) string {
-	var b strings.Builder
-	var cur []rune
-	for _, r := range string(data) {
-		if (r >= 32 && r <= 126) || (r >= 0x4e00 && r <= 0x9fa5) || r == '\n' || r == '\t' {
-			cur = append(cur, r)
+		runes := []rune(text)
+		end := min(length, skip+remaining)
+		chunk := string(runes[skip:end])
+		if result.Format == "pdf" {
+			result.Pages = append(result.Pages, PaperPage{opts.StartPage + i, skip, end, length, chunk})
 		} else {
-			if len(cur) >= 4 {
-				b.WriteString(string(cur))
-				b.WriteString("\n")
-			}
-			cur = cur[:0]
+			result.Content = chunk
 		}
-		if b.Len() >= maxChars*2 {
-			break
+		result.ReturnedChars += end - skip
+		remaining -= end - skip
+		skip = 0
+	}
+	result.NextOffset = result.Offset + result.ReturnedChars
+	result.HasMore = result.NextOffset < result.TotalChars
+	result.FullTextIncluded = result.RangeCoversDocument && result.ExtractionComplete && result.Offset == 0 && !result.HasMore
+	result.ContentLevel = "full_text_chunk"
+	if result.FullTextIncluded {
+		result.ContentLevel = "full_text"
+	} else if !result.ExtractionComplete {
+		result.ContentLevel = "partial_extraction"
+	}
+	result.ReadingNote = "按页引用已读内容。has_more=true 时继续执行 next_call，直到所需全文分段全部读完；最后一段到达末尾不代表此前各段已读。range_covers_document=false 表示仅选择了部分页面。full_text_included 只表示本次响应包含全部可提取文本，不包括图片。"
+	if result.HasMore {
+		args := map[string]any{"file_path": path, "offset": result.NextOffset, "max_chars": opts.MaxChars}
+		if result.Format == "pdf" {
+			args["start_page"], args["end_page"] = opts.StartPage, opts.EndPage
 		}
+		result.NextCall = &ToolCall{Name: "read_paper_content", Arguments: args}
 	}
-	if len(cur) >= 4 {
-		b.WriteString(string(cur))
-	}
-	return b.String()
+	return result, nil
 }

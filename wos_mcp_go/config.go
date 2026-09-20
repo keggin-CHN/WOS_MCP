@@ -77,18 +77,6 @@ func LoadConfig() Config {
 	return cfg
 }
 
-// OrderedConfig defines the order of fields in config.json
-// Matches Python config.example.json standard exactly
-type OrderedConfig struct {
-	Username     string                 `json:"username"`
-	Password     string                 `json:"password,omitempty"`
-	Port         int                    `json:"port"`
-	DownloadPath string                 `json:"download_path"`
-	WosSid       string                 `json:"wos_sid"`
-	WosCookies   map[string]interface{} `json:"wos_cookies"`
-	CnkiCookies  map[string]interface{} `json:"cnki_cookies"`
-}
-
 func getStr(cfg Config, key string) string {
 	if val, ok := cfg[key].(string); ok {
 		return val
@@ -113,6 +101,21 @@ func getMap(cfg Config, key string) map[string]interface{} {
 	return make(map[string]interface{})
 }
 
+func getStringSlice(cfg Config, key string) []string {
+	var values []string
+	switch raw := cfg[key].(type) {
+	case []string:
+		values = raw
+	case []interface{}:
+		for _, value := range raw {
+			if s, ok := value.(string); ok && s != "" {
+				values = append(values, s)
+			}
+		}
+	}
+	return values
+}
+
 // SaveConfig saves the configuration to ConfigPath
 func SaveConfig(cfg Config) error {
 
@@ -125,20 +128,23 @@ func SaveConfig(cfg Config) error {
 		}
 	}
 
-	oc := OrderedConfig{
-		Username:     getStr(cfg, "username"),
-		Password:     pwd,
-		Port:         getInt(cfg, "port", 5000),
-		DownloadPath: getStr(cfg, "download_path"),
-		WosSid:       getStr(cfg, "wos_sid"),
-		WosCookies:   getMap(cfg, "wos_cookies"),
-		CnkiCookies:  getMap(cfg, "cnki_cookies"),
+	// Session refresh must preserve local reading policy, listener settings and
+	// provider settings, including fields added by newer versions.
+	saved := make(Config, len(cfg))
+	for key, value := range cfg {
+		saved[key] = value
 	}
-	if oc.DownloadPath == "" {
-		oc.DownloadPath = "download"
+	if pwd != "" {
+		saved["password"] = pwd
+	}
+	if getStr(saved, "download_path") == "" {
+		saved["download_path"] = "download"
+	}
+	if getInt(saved, "port", 0) == 0 {
+		saved["port"] = 5000
 	}
 
-	data, err := json.MarshalIndent(oc, "", "    ")
+	data, err := json.MarshalIndent(saved, "", "    ")
 	if err != nil {
 		return err
 	}
