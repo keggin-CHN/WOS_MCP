@@ -92,6 +92,32 @@ func TestRejectBadDownloadsAndCleanPartialFiles(t *testing.T) {
 	}
 }
 
+func TestDownloadTrimsTrailingDataAfterEOF(t *testing.T) {
+	paperTestEnvironment(t)
+	pdf := fixturePDF(t, "CNKI 正文")
+	body := append(append([]byte(nil), pdf...), []byte("\nWebFastLoad???<FileProperty><Type>JOURNAL</Type></FileProperty>")...)
+	response := &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	paper, err := savePDFResponse(response, "cnki", "paper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := os.ReadFile(paper.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(saved, pdf) {
+		t.Fatalf("saved PDF still contains trailing data: got %d bytes, want %d", len(saved), len(pdf))
+	}
+	if paper.SizeBytes != int64(len(pdf)) {
+		t.Fatalf("reported size %d, want %d", paper.SizeBytes, len(pdf))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return fn(req) }

@@ -260,12 +260,15 @@ func savePDFResponse(resp *http.Response, subfolder, name string) (DownloadedPap
 	if resp.ContentLength >= 0 && written != resp.ContentLength {
 		return DownloadedPaper{}, fmt.Errorf("incomplete download: received %d of %d bytes", written, resp.ContentLength)
 	}
-	tail := make([]byte, min(written, 4096))
-	if _, err := f.ReadAt(tail, written-int64(len(tail))); err != nil {
-		return DownloadedPaper{}, err
+	logicalSize, err := pdfLogicalEnd(f, written)
+	if err != nil {
+		return DownloadedPaper{}, fmt.Errorf("incomplete PDF: %w", err)
 	}
-	if !bytes.Contains(tail, []byte("%%EOF")) {
-		return DownloadedPaper{}, fmt.Errorf("incomplete PDF: missing end-of-file marker")
+	if logicalSize != written {
+		if err := f.Truncate(logicalSize); err != nil {
+			return DownloadedPaper{}, fmt.Errorf("trim PDF trailing data: %w", err)
+		}
+		written = logicalSize
 	}
 	if err := f.Close(); err != nil {
 		return DownloadedPaper{}, err

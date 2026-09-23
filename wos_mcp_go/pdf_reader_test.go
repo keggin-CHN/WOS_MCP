@@ -246,6 +246,19 @@ func TestEmptyCorruptAndInvalidReads(t *testing.T) {
 	}
 }
 
+func TestPDFWithTrailingDataAfterEOF(t *testing.T) {
+	paperTestEnvironment(t)
+	path := filepath.Join(downloadDir, "cnki-webfastload.pdf")
+	data := append(fixturePDF(t, "CNKI 正文"), []byte("\nWebFastLoad???<FileProperty><Type>JOURNAL</Type></FileProperty>")...)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	content, err := ReadPaper(context.Background(), path, ReadOptions{})
+	if err != nil || contentText(content) != "CNKI 正文" || !content.FullTextIncluded {
+		t.Fatalf("trailing CNKI metadata broke PDF read: %+v %v", content, err)
+	}
+}
+
 func TestTextContinuationAndPDFCacheRefresh(t *testing.T) {
 	paperTestEnvironment(t)
 	textPath := filepath.Join(downloadDir, "notes.txt")

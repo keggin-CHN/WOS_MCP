@@ -115,7 +115,11 @@ func loadPDF(ctx context.Context, path string, info os.FileInfo) (doc *pdfDocume
 	if !bytes.Contains(header[:n], []byte("%PDF-")) {
 		return nil, fmt.Errorf("file is not a PDF (it may be an HTML login page or CAJ file)")
 	}
-	r, err := pdf.NewReader(f, info.Size())
+	pdfSize, err := pdfLogicalEnd(f, info.Size())
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse PDF (damaged or password-protected): %w", err)
+	}
+	r, err := pdf.NewReader(f, pdfSize)
 	if err != nil {
 		return nil, fmt.Errorf("cannot parse PDF (damaged or password-protected): %w", err)
 	}
