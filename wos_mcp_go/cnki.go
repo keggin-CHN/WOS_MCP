@@ -362,119 +362,19 @@ func (c *CnkiClient) login(username string, password string) error {
 		resp.Body.Close()
 		finalURL = resp.Request.URL.String()
 	}
-	if !strings.Contains(finalURL, "uia.njfu.edu.cn") || !strings.Contains(finalURL, "login") {
-		return fmt.Errorf("CNKI SSO failed, URL: %s", finalURL)
-	}
-
 	doc, _ := goquery.NewDocumentFromReader(bytes.NewReader(body))
-	form := doc.Find("#casLoginForm")
-	if form.Length() == 0 {
-		return fmt.Errorf("CAS login form not found")
-	}
-	var lt, execution, aesKey string
-	lt, _ = form.Find("input[name='lt']").Attr("value")
-	execution, _ = form.Find("input[name='execution']").Attr("value")
-	loginAction, _ := form.Attr("action")
-	if loginAction == "" {
-		loginAction = finalURL
-	} else if !strings.HasPrefix(loginAction, "http") {
-		u, _ := url.Parse(finalURL)
-		rel, _ := url.Parse(loginAction)
-		loginAction = u.ResolveReference(rel).String()
-	}
-
-	aesKey, _ = form.Find("input#pwdDefaultEncryptSalt").Attr("value")
-	if aesKey == "" {
-		re := regexp.MustCompile(`pwdDefaultEncryptSalt\s*=\s*["']([^"']{8,32})["']`)
-		m := re.FindStringSubmatch(string(body))
-		if len(m) > 1 {
-			aesKey = m[1]
-		}
-	}
-
-	if lt == "" || execution == "" || aesKey == "" {
-		return fmt.Errorf("failed to parse CAS login page for CNKI")
-	}
-
-	captchaURL := fmt.Sprintf("%s/authserver/needCaptcha.html?username=%s&pwdEncrypt2=pwdEncryptSalt&_=%d",
-		casHost, url.QueryEscape(username), time.Now().UnixNano()/1e6)
-	reqC, _ := http.NewRequest("GET", captchaURL, nil)
-	reqC.Header.Set("User-Agent", userAgent)
-	respC, err := loginClient.client.Do(reqC)
-	if err == nil {
-		bodyC, _ := io.ReadAll(respC.Body)
-		respC.Body.Close()
-		text := strings.TrimSpace(string(bodyC))
-		if strings.HasPrefix(text, "true") || strings.Contains(text, "true::::") {
-			return fmt.Errorf("captcha required for CNKI CAS login")
-		}
-	}
-
-	encPwd := encryptPassword(password, aesKey)
-	data := url.Values{}
-	data.Set("username", strings.TrimSpace(username))
-	data.Set("password", encPwd)
-	data.Set("lt", strings.TrimSpace(lt))
-	data.Set("dllt", "userNamePasswordLogin")
-	data.Set("execution", strings.TrimSpace(execution))
-	data.Set("_eventId", "submit")
-	data.Set("rmShown", "1")
-
-	reqL, _ := http.NewRequest("POST", loginAction, strings.NewReader(data.Encode()))
-	reqL.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	reqL.Header.Set("User-Agent", userAgent)
-	reqL.Header.Set("Origin", casHost)
-	reqL.Header.Set("Referer", loginAction)
-	reqL.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	reqL.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-
-	resp, err = loginClient.client.Do(reqL)
+	resp, _, finalDoc, err := loginClient.completeSSO(resp, string(body), doc)
 	if err != nil {
-		return fmt.Errorf("CAS login POST failed: %w", err)
+		return fmt.Errorf("CNKI SSO failed: %w", err)
 	}
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	doc, _ = goquery.NewDocumentFromReader(bytes.NewReader(body))
 
 	finalURL = resp.Request.URL.String()
-	if strings.Contains(finalURL, "uia.njfu.edu.cn") && strings.Contains(finalURL, "/login") {
-		msg := strings.TrimSpace(doc.Find("#msg").Text())
+	if isCasLoginPage(finalURL, finalDoc) {
+		msg := casLoginErrorMessage(finalDoc)
 		if msg == "" {
-			msg = strings.TrimSpace(doc.Find(".form-error").Text())
+			msg = "unknown error"
 		}
 		return fmt.Errorf("CNKI CAS login failed: %s", msg)
-	}
-
-	if strings.Contains(finalURL, "idp-lib.njfu.edu.cn") && (strings.Contains(string(body), "_shib_idp_consent") || strings.Contains(finalURL, "execution=e1s2")) {
-		action, consentData, _ := parseAutoSubmitForm(doc)
-		if !strings.HasPrefix(action, "http") {
-			action = idpHost + action
-		}
-		consentData.Set("_shib_idp_consentOptions", "_shib_idp_rememberConsent")
-		consentData.Set("_eventId_proceed", "Accept")
-		reqCons, _ := http.NewRequest("POST", action, strings.NewReader(consentData.Encode()))
-		reqCons.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		reqCons.Header.Set("User-Agent", userAgent)
-		resp, err = loginClient.client.Do(reqCons)
-		if err != nil {
-			return fmt.Errorf("consent page failed: %w", err)
-		}
-		body, _ = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		doc, _ = goquery.NewDocumentFromReader(bytes.NewReader(body))
-		finalURL = resp.Request.URL.String()
-	}
-
-	if strings.Contains(string(body), "SAMLResponse") {
-		action, samlData, _ := parseAutoSubmitForm(doc)
-		reqS, _ := http.NewRequest("POST", action, strings.NewReader(samlData.Encode()))
-		reqS.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		reqS.Header.Set("User-Agent", userAgent)
-		resp, err = loginClient.client.Do(reqS)
-		if err != nil {
-			return fmt.Errorf("SAML response submit failed: %w", err)
-		}
-		resp.Body.Close()
 	}
 
 	reqKNS, _ := http.NewRequest("GET", "https://kns.cnki.net/kns8s/AdvSearch", nil)

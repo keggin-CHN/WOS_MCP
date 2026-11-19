@@ -89,7 +89,7 @@ func verifyWosSession(sid string, cookies map[string]string) bool {
 		req.AddCookie(&http.Cookie{Name: k, Value: v})
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second, Transport: newUTLSTransport()}
 	resp, err := client.Do(req)
 	if err != nil {
 		return false
